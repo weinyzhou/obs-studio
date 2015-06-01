@@ -8,9 +8,9 @@
 #include "graphics-hook.h"
 #include "../funchook.h"
 
-typedef HRESULT (WINAPI *resize_buffers_t)(IDXGISwapChain*, UINT, UINT, UINT,
-		DXGI_FORMAT, UINT);
-typedef HRESULT (WINAPI *present_t)(IDXGISwapChain*, UINT, UINT);
+typedef HRESULT (STDMETHODCALLTYPE *resize_buffers_t)(IDXGISwapChain*, UINT,
+		UINT, UINT, DXGI_FORMAT, UINT);
+typedef HRESULT (STDMETHODCALLTYPE *present_t)(IDXGISwapChain*, UINT, UINT);
 
 static struct func_hook resize_buffers;
 static struct func_hook present;
@@ -61,6 +61,8 @@ static bool setup_dxgi(IDXGISwapChain *swap)
 	return false;
 }
 
+static bool resize_buffers_called = false;
+
 static HRESULT STDMETHODCALLTYPE hook_resize_buffers(IDXGISwapChain *swap,
 		UINT buffer_count, UINT width, UINT height, DXGI_FORMAT format,
 		UINT flags)
@@ -78,6 +80,8 @@ static HRESULT STDMETHODCALLTYPE hook_resize_buffers(IDXGISwapChain *swap,
 	resize_buffers_t call = (resize_buffers_t)resize_buffers.call_addr;
 	hr = call(swap, buffer_count, width, height, format, flags);
 	rehook(&resize_buffers);
+
+	resize_buffers_called = true;
 
 	return hr;
 }
@@ -98,6 +102,7 @@ static HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain *swap,
 		UINT sync_interval, UINT flags)
 {
 	IDXGIResource *backbuffer = nullptr;
+	bool capture_overlay = global_hook_info->capture_overlay;
 	bool test_draw = (flags & DXGI_PRESENT_TEST) != 0;
 	bool capture;
 	HRESULT hr;
@@ -107,12 +112,13 @@ static HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain *swap,
 	}
 
 	capture = !test_draw && swap == data.swap && !!data.capture;
-	if (capture) {
+	if (capture && !capture_overlay) {
 		backbuffer = get_dxgi_backbuffer(swap);
-		capture = !!backbuffer;
 
-		if (capture && !global_hook_info->capture_overlay)
+		if (!!backbuffer) {
 			data.capture(swap, backbuffer);
+			backbuffer->Release();
+		}
 	}
 
 	unhook(&present);
@@ -120,11 +126,24 @@ static HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain *swap,
 	hr = call(swap, sync_interval, flags);
 	rehook(&present);
 
-	if (capture) {
-		if (global_hook_info->capture_overlay)
-			data.capture(swap, backbuffer);
+	if (capture && capture_overlay) {
+		/*
+		 * It seems that the first call to Present after ResizeBuffers
+		 * will cause the backbuffer to be invalidated, so do not
+		 * perform the post-overlay capture if ResizeBuffers has
+		 * recently been called.  (The backbuffer returned by
+		 * get_dxgi_backbuffer *will* be invalid otherwise)
+		 */
+		if (resize_buffers_called) {
+			resize_buffers_called = false;
+		} else {
+			backbuffer = get_dxgi_backbuffer(swap);
 
-		backbuffer->Release();
+			if (!!backbuffer) {
+				data.capture(swap, backbuffer);
+				backbuffer->Release();
+			}
+		}
 	}
 
 	return hr;
@@ -217,9 +236,9 @@ bool hook_dxgi(void)
 	resize_addr = get_offset_addr(dxgi_module,
 			global_hook_info->offsets.dxgi.resize);
 
-	hook_init(&present, present_addr, hook_present,
+	hook_init(&present, present_addr, (void*)hook_present,
 			"IDXGISwapChain::Present");
-	hook_init(&resize_buffers, resize_addr, hook_resize_buffers,
+	hook_init(&resize_buffers, resize_addr, (void*)hook_resize_buffers,
 			"IDXGISwapChain::ResizeBuffers");
 
 	rehook(&resize_buffers);

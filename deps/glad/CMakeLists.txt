@@ -35,13 +35,21 @@ target_compile_definitions(glad
 
 if(NOT MSVC)
 	target_compile_options(glad
-		PRIVATE -DPIC -fPIC -fvisibility=hidden)
+		PRIVATE -DPIC -fvisibility=hidden)
+	if(NOT MINGW)
+		target_compile_options(glad PRIVATE -fPIC)
+	endif()
 endif()
 
 if(NOT WIN32 AND NOT APPLE)
 	set(glad_PLATFORM_DEPS
-		-ldl
 		${X11_X11_LIB})
+	# only link to libdl on linux
+	if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+		set(glad_PLATFORM_DEPS
+			${glad_PLATFORM_DEPS}
+			-ldl)
+	endif()
 endif()
 
 target_link_libraries(glad

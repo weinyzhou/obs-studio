@@ -26,10 +26,12 @@ static inline void *get_property_data(struct obs_property *prop);
 
 struct float_data {
 	double min, max, step;
+	enum obs_number_type type;
 };
 
 struct int_data {
 	int min, max, step;
+	enum obs_number_type type;
 };
 
 struct list_item {
@@ -105,6 +107,7 @@ struct obs_property {
 struct obs_properties {
 	void                    *param;
 	void                    (*destroy)(void *param);
+	uint32_t                flags;
 
 	struct obs_property     *first_property;
 	struct obs_property     **last;
@@ -129,6 +132,17 @@ void obs_properties_set_param(obs_properties_t *props,
 
 	props->param   = param;
 	props->destroy = destroy;
+}
+
+void obs_properties_set_flags(obs_properties_t *props, uint32_t flags)
+{
+	if (props)
+		props->flags = flags;
+}
+
+uint32_t obs_properties_get_flags(obs_properties_t *props)
+{
+	return props ? props->flags : 0;
 }
 
 void *obs_properties_get_param(obs_properties_t *props)
@@ -289,8 +303,9 @@ obs_property_t *obs_properties_add_bool(obs_properties_t *props,
 	return new_prop(props, name, desc, OBS_PROPERTY_BOOL);
 }
 
-obs_property_t *obs_properties_add_int(obs_properties_t *props,
-		const char *name, const char *desc, int min, int max, int step)
+static obs_property_t *add_int(obs_properties_t *props,
+		const char *name, const char *desc, int min, int max, int step,
+		enum obs_number_type type)
 {
 	if (!props || has_prop(props, name)) return NULL;
 
@@ -299,12 +314,14 @@ obs_property_t *obs_properties_add_int(obs_properties_t *props,
 	data->min  = min;
 	data->max  = max;
 	data->step = step;
+	data->type = type;
 	return p;
 }
 
-obs_property_t *obs_properties_add_float(obs_properties_t *props,
+static obs_property_t *add_flt(obs_properties_t *props,
 		const char *name, const char *desc,
-		double min, double max, double step)
+		double min, double max, double step,
+		enum obs_number_type type)
 {
 	if (!props || has_prop(props, name)) return NULL;
 
@@ -314,7 +331,34 @@ obs_property_t *obs_properties_add_float(obs_properties_t *props,
 	data->min  = min;
 	data->max  = max;
 	data->step = step;
+	data->type = type;
 	return p;
+}
+
+obs_property_t *obs_properties_add_int(obs_properties_t *props,
+		const char *name, const char *desc, int min, int max, int step)
+{
+	return add_int(props, name, desc, min, max, step, OBS_NUMBER_SCROLLER);
+}
+
+obs_property_t *obs_properties_add_float(obs_properties_t *props,
+		const char *name, const char *desc,
+		double min, double max, double step)
+{
+	return add_flt(props, name, desc, min, max, step, OBS_NUMBER_SCROLLER);
+}
+
+obs_property_t *obs_properties_add_int_slider(obs_properties_t *props,
+		const char *name, const char *desc, int min, int max, int step)
+{
+	return add_int(props, name, desc, min, max, step, OBS_NUMBER_SLIDER);
+}
+
+obs_property_t *obs_properties_add_float_slider(obs_properties_t *props,
+		const char *name, const char *desc,
+		double min, double max, double step)
+{
+	return add_flt(props, name, desc, min, max, step, OBS_NUMBER_SLIDER);
 }
 
 obs_property_t *obs_properties_add_text(obs_properties_t *props,
@@ -509,6 +553,12 @@ int obs_property_int_step(obs_property_t *p)
 	return data ? data->step : 0;
 }
 
+enum obs_number_type obs_property_int_type(obs_property_t *p)
+{
+	struct int_data *data = get_type_data(p, OBS_PROPERTY_INT);
+	return data ? data->type : OBS_NUMBER_SCROLLER;
+}
+
 double obs_property_float_min(obs_property_t *p)
 {
 	struct float_data *data = get_type_data(p, OBS_PROPERTY_FLOAT);
@@ -525,6 +575,12 @@ double obs_property_float_step(obs_property_t *p)
 {
 	struct float_data *data = get_type_data(p, OBS_PROPERTY_FLOAT);
 	return data ? data->step : 0;
+}
+
+enum obs_number_type obs_property_float_type(obs_property_t *p)
+{
+	struct float_data *data = get_type_data(p, OBS_PROPERTY_FLOAT);
+	return data ? data->type : OBS_NUMBER_SCROLLER;
 }
 
 enum obs_text_type obs_proprety_text_type(obs_property_t *p)

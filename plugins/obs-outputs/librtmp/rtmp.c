@@ -400,7 +400,7 @@ RTMP_GetDuration(RTMP *r)
 int
 RTMP_IsConnected(RTMP *r)
 {
-    return r->m_sb.sb_socket != -1;
+    return r->m_sb.sb_socket != INVALID_SOCKET;
 }
 
 SOCKET
@@ -642,15 +642,16 @@ int RTMP_AddStream(RTMP *r, const char *playpath)
 }
 
 static int
-add_addr_info(struct sockaddr_storage *service, AVal *host, int port)
+add_addr_info(struct sockaddr_storage *service, socklen_t *addrlen, AVal *host, int port)
 {
     char *hostname;
     int ret = TRUE;
-    if (host->av_val[host->av_len])
+    if (host->av_val[host->av_len] || host->av_val[0] == '[')
     {
-        hostname = malloc(host->av_len+1);
-        memcpy(hostname, host->av_val, host->av_len);
-        hostname[host->av_len] = '\0';
+        int v6 = host->av_val[0] == '[';
+        hostname = malloc(host->av_len+1 - v6 * 2);
+        memcpy(hostname, host->av_val + v6, host->av_len - v6 * 2);
+        hostname[host->av_len - v6 * 2] = '\0';
     }
     else
     {
@@ -668,6 +669,7 @@ add_addr_info(struct sockaddr_storage *service, AVal *host, int port)
     hints.ai_protocol = IPPROTO_TCP;
 
     service->ss_family = AF_UNSPEC;
+    *addrlen = 0;
 
     char portStr[8];
 
@@ -691,13 +693,14 @@ add_addr_info(struct sockaddr_storage *service, AVal *host, int port)
         if (ptr->ai_family == AF_INET || ptr->ai_family == AF_INET6)
         {
             memcpy(service, ptr->ai_addr, ptr->ai_addrlen);
+            *addrlen = (socklen_t)ptr->ai_addrlen;
             break;
         }
     }
 
     freeaddrinfo(result);
 
-    if (service->ss_family == AF_UNSPEC)
+    if (service->ss_family == AF_UNSPEC || *addrlen == 0)
     {
         RTMP_Log(RTMP_LOGERROR, "Could not resolve server '%s': no valid address found", hostname);
         ret = FALSE;
@@ -721,7 +724,7 @@ finish:
 #endif
 
 int
-RTMP_Connect0(RTMP *r, struct sockaddr * service)
+RTMP_Connect0(RTMP *r, struct sockaddr * service, socklen_t addrlen)
 {
     int on = 1;
     r->m_sb.sb_timedout = FALSE;
@@ -735,7 +738,7 @@ RTMP_Connect0(RTMP *r, struct sockaddr * service)
     r->m_sb.sb_socket = socket(service->sa_family, SOCK_STREAM, IPPROTO_TCP);
 #endif
 
-    if (r->m_sb.sb_socket != -1)
+    if (r->m_sb.sb_socket != INVALID_SOCKET)
     {
         if(r->m_bindIP.addrLen)
         {
@@ -749,7 +752,7 @@ RTMP_Connect0(RTMP *r, struct sockaddr * service)
             }
         }
 
-        if (connect(r->m_sb.sb_socket, service, sizeof(struct sockaddr_storage)) < 0)
+        if (connect(r->m_sb.sb_socket, service, addrlen) < 0)
         {
             int err = GetSockError();
             if (err == E_CONNREFUSED)
@@ -880,6 +883,7 @@ RTMP_Connect(RTMP *r, RTMPPacket *cp)
     HOSTENT *h;
 #endif
     struct sockaddr_storage service;
+    socklen_t addrlen = 0;
     if (!r->Link.hostname.av_len)
         return FALSE;
 
@@ -898,17 +902,17 @@ RTMP_Connect(RTMP *r, RTMPPacket *cp)
     if (r->Link.socksport)
     {
         /* Connect via SOCKS */
-        if (!add_addr_info(&service, &r->Link.sockshost, r->Link.socksport))
+        if (!add_addr_info(&service, &addrlen, &r->Link.sockshost, r->Link.socksport))
             return FALSE;
     }
     else
     {
         /* Connect directly */
-        if (!add_addr_info(&service, &r->Link.hostname, r->Link.port))
+        if (!add_addr_info(&service, &addrlen, &r->Link.hostname, r->Link.port))
             return FALSE;
     }
 
-    if (!RTMP_Connect0(r, (struct sockaddr *)&service))
+    if (!RTMP_Connect0(r, (struct sockaddr *)&service, addrlen))
         return FALSE;
 
     r->m_bSendCounter = TRUE;
@@ -921,9 +925,10 @@ SocksNegotiate(RTMP *r)
 {
     unsigned long addr;
     struct sockaddr_storage service;
+    socklen_t addrlen = 0;
     memset(&service, 0, sizeof(service));
 
-    add_addr_info(&service, &r->Link.hostname, r->Link.port);
+    add_addr_info(&service, &addrlen, &r->Link.hostname, r->Link.port);
 
     // not doing IPv6 socks
     if (service.ss_family == AF_INET6)
@@ -3041,7 +3046,18 @@ HandleInvoke(RTMP *r, const char *body, unsigned int nBodySize)
                 AMFProp_GetString(AMF_GetProp(&obj2, &av_description, -1), &description);
                 RTMP_Log(RTMP_LOGDEBUG, "%s, error description: %s", __FUNCTION__, description.av_val);
                 /* if PublisherAuth returns 1, then reconnect */
-                PublisherAuth(r, &description);
+                if (PublisherAuth(r, &description) == 1)
+                {
+                    RTMP_Close(r);
+                    if (r->Link.pFlags & RTMP_PUB_CLATE)
+                    {
+                        r->Link.pFlags |= RTMP_PUB_CLEAN;
+                    }
+                    if (!RTMP_Connect(r, NULL) || !RTMP_ConnectStream(r, 0))
+                    {
+                        goto leave;
+                    }
+                }
             }
         }
         else
@@ -3536,7 +3552,7 @@ RTMP_ReadPacket(RTMP *r, RTMPPacket *packet)
     // int didAlloc = FALSE;
     int extendedTimestamp = 0;
 
-    RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d", __FUNCTION__, r->m_sb.sb_socket);
+    RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d", __FUNCTION__, (int)r->m_sb.sb_socket);
 
     if (ReadN(r, (char *)hbuf, 1) == 0)
     {
@@ -3860,7 +3876,7 @@ RTMP_SendChunk(RTMP *r, RTMPChunk *chunk)
     int wrote;
     char hbuf[RTMP_MAX_HEADER_SIZE];
 
-    RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d, size=%d", __FUNCTION__, r->m_sb.sb_socket,
+    RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d, size=%d", __FUNCTION__, (int)r->m_sb.sb_socket,
              chunk->c_chunkSize);
     RTMP_LogHexString(RTMP_LOGDEBUG2, (uint8_t *)chunk->c_header, chunk->c_headerSize);
     if (chunk->c_chunkSize)
@@ -4004,7 +4020,7 @@ RTMP_SendPacket(RTMP *r, RTMPPacket *packet, int queue)
     buffer = packet->m_body;
     nChunkSize = r->m_outChunkSize;
 
-    RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d, size=%d", __FUNCTION__, r->m_sb.sb_socket,
+    RTMP_Log(RTMP_LOGDEBUG2, "%s: fd=%d, size=%d", __FUNCTION__, (int)r->m_sb.sb_socket,
              nSize);
     /* send all chunks in one HTTP request */
     if (r->Link.protocol & RTMP_FEATURE_HTTP)
@@ -4236,6 +4252,7 @@ RTMP_Close(RTMP *r)
         r->Link.streams[idx].playpath.av_val = NULL;
     }
 
+    r->Link.curStreamIdx = 0;
     r->Link.nStreams = 0;
 #endif
 }
@@ -4328,7 +4345,7 @@ RTMPSockBuf_Close(RTMPSockBuf *sb)
         sb->sb_ssl = NULL;
     }
 #endif
-    if (sb->sb_socket != -1)
+    if (sb->sb_socket != INVALID_SOCKET)
         return closesocket(sb->sb_socket);
     return 0;
 }

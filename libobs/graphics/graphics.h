@@ -426,7 +426,7 @@ struct gs_window {
 	void                    *hwnd;
 #elif defined(__APPLE__)
 	__unsafe_unretained id  view;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
 	/* I'm not sure how portable defining id to uint32_t is. */
 	uint32_t id;
 	void* display;
@@ -537,6 +537,8 @@ EXPORT void gs_cubetexture_set_image(gs_texture_t *cubetex, uint32_t side,
 
 EXPORT void gs_perspective(float fovy, float aspect, float znear, float zfar);
 
+EXPORT void gs_blend_state_push(void);
+EXPORT void gs_blend_state_pop(void);
 EXPORT void gs_reset_blend_state(void);
 
 /* -------------------------- */
@@ -631,6 +633,9 @@ EXPORT void gs_enable_stencil_write(bool enable);
 EXPORT void gs_enable_color(bool red, bool green, bool blue, bool alpha);
 
 EXPORT void gs_blend_function(enum gs_blend_type src, enum gs_blend_type dest);
+EXPORT void gs_blend_function_separate(
+		enum gs_blend_type src_c, enum gs_blend_type dest_c,
+		enum gs_blend_type src_a, enum gs_blend_type dest_a);
 EXPORT void gs_depth_function(enum gs_depth_test test);
 
 EXPORT void gs_stencil_function(enum gs_stencil_side side,

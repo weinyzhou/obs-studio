@@ -14,6 +14,7 @@ set(graphics-hook_SOURCES
 	../funchook.c
 	../obfuscate.c
 	gl-capture.c
+	d3d8-capture.cpp
 	d3d9-capture.cpp
 	dxgi-capture.cpp
 	d3d10-capture.cpp
@@ -24,7 +25,7 @@ add_library(graphics-hook MODULE
 	${graphics-hook_HEADERS})
 
 target_link_libraries(graphics-hook
-	ipc-util)
+	ipc-util psapi)
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
 	set(_output_suffix "64")

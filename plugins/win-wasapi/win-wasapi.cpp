@@ -22,18 +22,20 @@ class WASAPISource {
 	ComPtr<IMMDevice>           device;
 	ComPtr<IAudioClient>        client;
 	ComPtr<IAudioCaptureClient> capture;
+	ComPtr<IAudioRenderClient>  render;
 
 	obs_source_t                *source;
 	string                      device_id;
 	string                      device_name;
 	bool                        isInputDevice;
-	bool                        useDeviceTiming;
-	bool                        isDefaultDevice;
+	bool                        useDeviceTiming = false;
+	bool                        isDefaultDevice = false;
 
-	bool                        reconnecting;
+	bool                        reconnecting = false;
+	bool                        previouslyFailed = false;
 	WinHandle                   reconnectThread;
 
-	bool                        active;
+	bool                        active = false;
 	WinHandle                   captureThread;
 
 	WinHandle                   stopSignal;
@@ -55,6 +57,7 @@ class WASAPISource {
 	bool InitDevice(IMMDeviceEnumerator *enumerator);
 	void InitName();
 	void InitClient();
+	void InitRender();
 	void InitFormat(WAVEFORMATEX *wfex);
 	void InitCapture();
 	void Initialize();
@@ -72,11 +75,7 @@ public:
 
 WASAPISource::WASAPISource(obs_data_t *settings, obs_source_t *source_,
 		bool input)
-	: reconnecting    (false),
-	  active          (false),
-	  reconnectThread (nullptr),
-	  captureThread   (nullptr),
-	  source          (source_),
+	: source          (source_),
 	  isInputDevice   (input)
 {
 	UpdateSettings(settings);
@@ -194,6 +193,51 @@ void WASAPISource::InitClient()
 		throw HRError("Failed to get initialize audio client", res);
 }
 
+void WASAPISource::InitRender()
+{
+	CoTaskMemPtr<WAVEFORMATEX> wfex;
+	HRESULT                    res;
+	LPBYTE                     buffer;
+	UINT32                     frames;
+	ComPtr<IAudioClient>       client;
+
+	res = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
+			nullptr, (void**)client.Assign());
+	if (FAILED(res))
+		throw HRError("Failed to activate client context", res);
+
+	res = client->GetMixFormat(&wfex);
+	if (FAILED(res))
+		throw HRError("Failed to get mix format", res);
+
+	res = client->Initialize(
+			AUDCLNT_SHAREMODE_SHARED, 0,
+			BUFFER_TIME_100NS, 0, wfex, nullptr);
+	if (FAILED(res))
+		throw HRError("Failed to get initialize audio client", res);
+
+	/* Silent loopback fix. Prevents audio stream from stopping and */
+	/* messing up timestamps and other weird glitches during silence */
+	/* by playing a silent sample all over again. */
+
+	res = client->GetBufferSize(&frames);
+	if (FAILED(res))
+		throw HRError("Failed to get buffer size", res);
+
+	res = client->GetService(__uuidof(IAudioRenderClient),
+		(void**)render.Assign());
+	if (FAILED(res))
+		throw HRError("Failed to get render client", res);
+
+	res = render->GetBuffer(frames, &buffer);
+	if (FAILED(res))
+		throw HRError("Failed to get buffer", res);
+
+	memset(buffer, 0, frames*wfex->nBlockAlign);
+
+	render->ReleaseBuffer(frames, 0);
+}
+
 static speaker_layout ConvertSpeakerLayout(DWORD layout, WORD channels)
 {
 	switch (layout) {
@@ -266,6 +310,7 @@ void WASAPISource::Initialize()
 	device_name = GetDeviceName(device);
 
 	InitClient();
+	if (!isInputDevice) InitRender();
 	InitCapture();
 }
 
@@ -275,18 +320,25 @@ bool WASAPISource::TryInitialize()
 		Initialize();
 
 	} catch (HRError error) {
+		if (previouslyFailed)
+			return active;
+
 		blog(LOG_WARNING, "[WASAPISource::TryInitialize]:[%s] %s: %lX",
 				device_name.empty() ?
 					device_id.c_str() : device_name.c_str(),
 				error.str, error.hr);
 
 	} catch (const char *error) {
+		if (previouslyFailed)
+			return active;
+
 		blog(LOG_WARNING, "[WASAPISource::TryInitialize]:[%s] %s",
 				device_name.empty() ?
 					device_id.c_str() : device_name.c_str(),
 				error);
 	}
 
+	previouslyFailed = !active;
 	return active;
 }
 
@@ -299,13 +351,13 @@ void WASAPISource::Reconnect()
 
 	if (!reconnectThread.Valid())
 		blog(LOG_WARNING, "[WASAPISource::Reconnect] "
-		                "Failed to intiialize reconnect thread: %d",
+		                "Failed to intiialize reconnect thread: %lu",
 		                 GetLastError());
 }
 
 static inline bool WaitForSignal(HANDLE handle, DWORD time)
 {
-	return WaitForSingleObject(handle, time) == WAIT_TIMEOUT;
+	return WaitForSingleObject(handle, time) != WAIT_TIMEOUT;
 }
 
 #define RECONNECT_INTERVAL 3000
@@ -494,8 +546,7 @@ static obs_properties_t *GetWASAPIProperties(bool input)
 				device.name.c_str(), device.id.c_str());
 	}
 
-	obs_property_t *prop;
-	prop = obs_properties_add_bool(props, OPT_USE_DEVICE_TIMING,
+	obs_properties_add_bool(props, OPT_USE_DEVICE_TIMING,
 			obs_module_text("UseDeviceTiming"));
 
 	return props;

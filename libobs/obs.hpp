@@ -24,6 +24,31 @@
 /* RAII wrappers */
 
 template<typename T, void addref(T), void release(T)>
+class OBSRef;
+
+using OBSSource = OBSRef<obs_source_t*, obs_source_addref, obs_source_release>;
+using OBSScene = OBSRef<obs_scene_t*,  obs_scene_addref,  obs_scene_release>;
+using OBSSceneItem = OBSRef<obs_sceneitem_t*, obs_sceneitem_addref,
+						obs_sceneitem_release>;
+using OBSData = OBSRef<obs_data_t*, obs_data_addref, obs_data_release>;
+using OBSDataArray = OBSRef<obs_data_array_t*, obs_data_array_addref,
+						obs_data_array_release>;
+using OBSOutput = OBSRef<obs_output_t*, obs_output_addref, obs_output_release>;
+using OBSEncoder = OBSRef<obs_encoder_t*, obs_encoder_addref,
+						obs_encoder_release>;
+using OBSService = OBSRef<obs_service_t*, obs_service_addref,
+						obs_service_release>;
+
+using OBSWeakSource = OBSRef<obs_weak_source_t*, obs_weak_source_addref,
+						obs_weak_source_release>;
+using OBSWeakOutput = OBSRef<obs_weak_output_t*, obs_weak_output_addref,
+						obs_weak_output_release>;
+using OBSWeakEncoder = OBSRef<obs_weak_encoder_t*, obs_weak_encoder_addref,
+						obs_weak_encoder_release>;
+using OBSWeakService = OBSRef<obs_weak_service_t*, obs_weak_service_addref,
+						obs_weak_service_release>;
+
+template<typename T, void addref(T), void release(T)>
 class OBSRef {
 	T val;
 
@@ -34,6 +59,9 @@ class OBSRef {
 		val = valIn;
 		return *this;
 	}
+
+	struct TakeOwnership {};
+	inline OBSRef(T val, TakeOwnership) : val(val)           {}
 
 public:
 	inline OBSRef() : val(nullptr)                  {}
@@ -61,15 +89,65 @@ public:
 
 	inline bool operator==(T p) const {return val == p;}
 	inline bool operator!=(T p) const {return val != p;}
+
+	friend OBSSource OBSGetStrongRef(obs_weak_source_t *weak);
+	friend OBSWeakSource OBSGetWeakRef(obs_source_t *source);
+
+	friend OBSOutput OBSGetStrongRef(obs_weak_output_t *weak);
+	friend OBSWeakOutput OBSGetWeakRef(obs_output_t *output);
+
+	friend OBSEncoder OBSGetStrongRef(obs_weak_encoder_t *weak);
+	friend OBSWeakEncoder OBSGetWeakRef(obs_encoder_t *encoder);
+
+	friend OBSService OBSGetStrongRef(obs_weak_service_t *weak);
+	friend OBSWeakService OBSGetWeakRef(obs_service_t *service);
 };
 
-using OBSSource = OBSRef<obs_source_t*, obs_source_addref, obs_source_release>;
-using OBSScene = OBSRef<obs_scene_t*,  obs_scene_addref,  obs_scene_release>;
-using OBSSceneItem = OBSRef<obs_sceneitem_t*, obs_sceneitem_addref,
-						obs_sceneitem_release>;
-using OBSData = OBSRef<obs_data_t*, obs_data_addref, obs_data_release>;
-using OBSDataArray = OBSRef<obs_data_array_t*, obs_data_array_addref,
-						obs_data_array_release>;
+inline OBSSource OBSGetStrongRef(obs_weak_source_t *weak)
+{
+	return {obs_weak_source_get_source(weak), OBSSource::TakeOwnership()};
+}
+
+inline OBSWeakSource OBSGetWeakRef(obs_source_t *source)
+{
+	return {obs_source_get_weak_source(source),
+		OBSWeakSource::TakeOwnership()};
+}
+
+inline OBSOutput OBSGetStrongRef(obs_weak_output_t *weak)
+{
+	return {obs_weak_output_get_output(weak), OBSOutput::TakeOwnership()};
+}
+
+inline OBSWeakOutput OBSGetWeakRef(obs_output_t *output)
+{
+	return {obs_output_get_weak_output(output),
+		OBSWeakOutput::TakeOwnership()};
+}
+
+inline OBSEncoder OBSGetStrongRef(obs_weak_encoder_t *weak)
+{
+	return {obs_weak_encoder_get_encoder(weak),
+		OBSEncoder::TakeOwnership()};
+}
+
+inline OBSWeakEncoder OBSGetWeakRef(obs_encoder_t *encoder)
+{
+	return {obs_encoder_get_weak_encoder(encoder),
+		OBSWeakEncoder::TakeOwnership()};
+}
+
+inline OBSService OBSGetStrongRef(obs_weak_service_t *weak)
+{
+	return {obs_weak_service_get_service(weak),
+		OBSService::TakeOwnership()};
+}
+
+inline OBSWeakService OBSGetWeakRef(obs_service_t *service)
+{
+	return {obs_service_get_weak_service(service),
+		OBSWeakService::TakeOwnership()};
+}
 
 /* objects that are not meant to be instanced */
 template<typename T, void destroy(T)> class OBSObj {
@@ -107,9 +185,7 @@ public:
 };
 
 using OBSDisplay = OBSObj<obs_display_t*, obs_display_destroy>;
-using OBSEncoder = OBSObj<obs_encoder_t*, obs_encoder_destroy>;
 using OBSView    = OBSObj<obs_view_t*,    obs_view_destroy>;
-using OBSOutput  = OBSObj<obs_output_t*,  obs_output_destroy>;
 
 /* signal handler connection */
 class OBSSignal {

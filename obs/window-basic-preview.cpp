@@ -59,6 +59,7 @@ static bool SceneItemHasVideo(obs_sceneitem_t *item)
 
 static bool CloseFloat(float a, float b, float epsilon=0.01)
 {
+	using std::abs;
 	return abs(a-b) <= epsilon;
 }
 
@@ -340,10 +341,14 @@ void OBSBasicPreview::mousePressEvent(QMouseEvent *event)
 	float x = float(event->x()) - main->previewX / pixelRatio;
 	float y = float(event->y()) - main->previewY / pixelRatio;
 
-	if (event->button() != Qt::LeftButton)
+	OBSQTDisplay::mousePressEvent(event);
+
+	if (event->button() != Qt::LeftButton &&
+	    event->button() != Qt::RightButton)
 		return;
 
-	mouseDown = true;
+	if (event->button() == Qt::LeftButton)
+		mouseDown = true;
 
 	vec2_set(&startPos, x, y);
 	GetStretchHandleData(startPos);
@@ -354,6 +359,9 @@ void OBSBasicPreview::mousePressEvent(QMouseEvent *event)
 
 	mouseOverItems = SelectedAtPos(startPos);
 	vec2_zero(&lastMoveOffset);
+
+	if (event->button() == Qt::RightButton)
+		ProcessClick(startPos);
 }
 
 static bool select_one(obs_scene_t *scene, obs_sceneitem_t *item, void *param)

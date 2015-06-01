@@ -487,6 +487,7 @@ static void program_set_param_data(struct gs_program *program,
 		}
 
 	} else if (pp->param->type == GS_SHADER_PARAM_TEXTURE) {
+		glUniform1i(pp->obj, pp->param->texture_id);
 		device_load_texture(program->device, pp->param->texture,
 				pp->param->texture_id);
 	}
@@ -559,9 +560,7 @@ static bool assign_program_param(struct gs_program *program,
 		return false;
 
 	if (info.obj == -1) {
-		blog(LOG_ERROR, "Program parameter '%s' not found",
-				param->name);
-		return false;
+		return true;
 	}
 
 	info.param = param;

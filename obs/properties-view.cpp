@@ -6,6 +6,7 @@
 #include <QFontDialog>
 #include <QLineEdit>
 #include <QSpinBox>
+#include <QSlider>
 #include <QDoubleSpinBox>
 #include <QComboBox>
 #include <QPushButton>
@@ -13,6 +14,7 @@
 #include <QFileDialog>
 #include <QColorDialog>
 #include <QPlainTextEdit>
+#include "double-slider.hpp"
 #include "qt-wrappers.hpp"
 #include "properties-view.hpp"
 #include "obs-app.hpp"
@@ -50,8 +52,13 @@ void OBSPropertiesView::ReloadProperties()
 		obs_properties_apply_settings(properties.get(), settings);
 	}
 
+	uint32_t flags = obs_properties_get_flags(properties.get());
+	deferUpdate = (flags & OBS_PROPERTIES_DEFER_UPDATE) != 0;
+
 	RefreshProperties();
 }
+
+#define NO_PROPERTIES_STRING QTStr("Basic.PropertiesWindow.NoProperties")
 
 void OBSPropertiesView::RefreshProperties()
 {
@@ -75,6 +82,7 @@ void OBSPropertiesView::RefreshProperties()
 	layout->setLabelAlignment(Qt::AlignRight);
 
 	obs_property_t *property = obs_properties_first(properties.get());
+	bool hasNoProperties = !property;
 
 	while (property) {
 		AddProperty(property, layout);
@@ -90,6 +98,11 @@ void OBSPropertiesView::RefreshProperties()
 	if (lastWidget) {
 		lastWidget->setFocus(Qt::OtherFocusReason);
 		lastWidget = nullptr;
+	}
+
+	if (hasNoProperties) {
+		QLabel *noPropertiesLabel = new QLabel(NO_PROPERTIES_STRING);
+		layout->addWidget(noPropertiesLabel);
 	}
 }
 
@@ -156,7 +169,7 @@ QWidget *OBSPropertiesView::NewWidget(obs_property_t *prop, QWidget *widget,
 {
 	WidgetInfo *info = new WidgetInfo(this, prop, widget);
 	connect(widget, signal, info, SLOT(ControlChanged()));
-	children.push_back(std::move(unique_ptr<WidgetInfo>(info)));
+	children.emplace_back(info);
 	return widget;
 }
 
@@ -171,7 +184,8 @@ QWidget *OBSPropertiesView::AddCheckbox(obs_property_t *prop)
 	return NewWidget(prop, checkbox, SIGNAL(stateChanged(int)));
 }
 
-QWidget *OBSPropertiesView::AddText(obs_property_t *prop)
+QWidget *OBSPropertiesView::AddText(obs_property_t *prop, QFormLayout *layout,
+		QLabel *&label)
 {
 	const char    *name = obs_property_name(prop);
 	const char    *val  = obs_data_get_string(settings, name);
@@ -180,12 +194,34 @@ QWidget *OBSPropertiesView::AddText(obs_property_t *prop)
 	if (type == OBS_TEXT_MULTILINE) {
 		QPlainTextEdit *edit = new QPlainTextEdit(QT_UTF8(val));
 		return NewWidget(prop, edit, SIGNAL(textChanged()));
+
+	} else if (type == OBS_TEXT_PASSWORD) {
+		QLayout *subLayout = new QHBoxLayout();
+		QLineEdit *edit = new QLineEdit();
+		QPushButton *show = new QPushButton();
+
+		show->setText(QTStr("Show"));
+		show->setCheckable(true);
+		edit->setText(QT_UTF8(val));
+		edit->setEchoMode(QLineEdit::Password);
+
+		subLayout->addWidget(edit);
+		subLayout->addWidget(show);
+
+		WidgetInfo *info = new WidgetInfo(this, prop, edit);
+		connect(show, &QAbstractButton::toggled,
+				info, &WidgetInfo::TogglePasswordText);
+		children.emplace_back(info);
+
+		label = new QLabel(QT_UTF8(obs_property_description(prop)));
+		layout->addRow(label, subLayout);
+
+		connect(edit, SIGNAL(textEdited(const QString &)),
+				info, SLOT(ControlChanged()));
+		return nullptr;
 	}
 
 	QLineEdit *edit = new QLineEdit();
-
-	if (type == OBS_TEXT_PASSWORD)
-		edit->setEchoMode(QLineEdit::Password);
 
 	edit->setText(QT_UTF8(val));
 
@@ -209,38 +245,98 @@ void OBSPropertiesView::AddPath(obs_property_t *prop, QFormLayout *layout,
 
 	WidgetInfo *info = new WidgetInfo(this, prop, edit);
 	connect(button, SIGNAL(clicked()), info, SLOT(ControlChanged()));
-	children.push_back(std::move(unique_ptr<WidgetInfo>(info)));
+	children.emplace_back(info);
 
 	*label = new QLabel(QT_UTF8(obs_property_description(prop)));
 	layout->addRow(*label, subLayout);
 }
 
-QWidget *OBSPropertiesView::AddInt(obs_property_t *prop)
+void OBSPropertiesView::AddInt(obs_property_t *prop, QFormLayout *layout,
+		QLabel **label)
 {
+	obs_number_type type = obs_property_int_type(prop);
+	QLayout *subLayout = new QHBoxLayout();
+
 	const char *name = obs_property_name(prop);
 	int        val   = (int)obs_data_get_int(settings, name);
 	QSpinBox   *spin = new QSpinBox();
 
-	spin->setMinimum(obs_property_int_min(prop));
-	spin->setMaximum(obs_property_int_max(prop));
-	spin->setSingleStep(obs_property_int_step(prop));
+	int minVal = obs_property_int_min(prop);
+	int maxVal = obs_property_int_max(prop);
+	int stepVal = obs_property_int_step(prop);
+
+	spin->setMinimum(minVal);
+	spin->setMaximum(maxVal);
+	spin->setSingleStep(stepVal);
 	spin->setValue(val);
 
-	return NewWidget(prop, spin, SIGNAL(valueChanged(int)));
+	WidgetInfo *info = new WidgetInfo(this, prop, spin);
+	children.emplace_back(info);
+
+	if (type == OBS_NUMBER_SLIDER) {
+		QSlider *slider = new QSlider();
+		slider->setMinimum(minVal);
+		slider->setMaximum(maxVal);
+		slider->setPageStep(stepVal);
+		slider->setValue(val);
+		slider->setOrientation(Qt::Horizontal);
+		subLayout->addWidget(slider);
+
+		connect(slider, SIGNAL(valueChanged(int)),
+				spin, SLOT(setValue(int)));
+		connect(spin, SIGNAL(valueChanged(int)),
+				slider, SLOT(setValue(int)));
+	}
+
+	connect(spin, SIGNAL(valueChanged(int)), info, SLOT(ControlChanged()));
+
+	subLayout->addWidget(spin);
+
+	*label = new QLabel(QT_UTF8(obs_property_description(prop)));
+	layout->addRow(*label, subLayout);
 }
 
-QWidget *OBSPropertiesView::AddFloat(obs_property_t *prop)
+void OBSPropertiesView::AddFloat(obs_property_t *prop, QFormLayout *layout,
+		QLabel **label)
 {
+	obs_number_type type = obs_property_float_type(prop);
+	QLayout *subLayout = new QHBoxLayout();
+
 	const char     *name = obs_property_name(prop);
 	double         val   = obs_data_get_double(settings, name);
 	QDoubleSpinBox *spin = new QDoubleSpinBox();
 
-	spin->setMinimum(obs_property_float_min(prop));
-	spin->setMaximum(obs_property_float_max(prop));
-	spin->setSingleStep(obs_property_float_step(prop));
+	double minVal = obs_property_float_min(prop);
+	double maxVal = obs_property_float_max(prop);
+	double stepVal = obs_property_float_step(prop);
+
+	spin->setMinimum(minVal);
+	spin->setMaximum(maxVal);
+	spin->setSingleStep(stepVal);
 	spin->setValue(val);
 
-	return NewWidget(prop, spin, SIGNAL(valueChanged(double)));
+	WidgetInfo *info = new WidgetInfo(this, prop, spin);
+	children.emplace_back(info);
+
+	if (type == OBS_NUMBER_SLIDER) {
+		DoubleSlider *slider = new DoubleSlider();
+		slider->setDoubleConstraints(minVal, maxVal, stepVal, val);
+		slider->setOrientation(Qt::Horizontal);
+		subLayout->addWidget(slider);
+
+		connect(slider, SIGNAL(doubleValChanged(double)),
+				spin, SLOT(setValue(double)));
+		connect(spin, SIGNAL(valueChanged(double)),
+				slider, SLOT(setDoubleVal(double)));
+	}
+
+	connect(spin, SIGNAL(valueChanged(double)), info,
+			SLOT(ControlChanged()));
+
+	subLayout->addWidget(spin);
+
+	*label = new QLabel(QT_UTF8(obs_property_description(prop)));
+	layout->addRow(*label, subLayout);
 }
 
 static void AddComboItem(QComboBox *combo, obs_property_t *prop,
@@ -365,7 +461,7 @@ QWidget *OBSPropertiesView::AddList(obs_property_t *prop, bool &warning)
 	WidgetInfo *info = new WidgetInfo(this, prop, combo);
 	connect(combo, SIGNAL(currentIndexChanged(int)), info,
 				SLOT(ControlChanged()));
-	children.push_back(std::move(unique_ptr<WidgetInfo>(info)));
+	children.emplace_back(info);
 
 	/* trigger a settings update if the index was not found */
 	if (idx == -1)
@@ -492,13 +588,13 @@ void OBSPropertiesView::AddProperty(obs_property_t *property,
 		widget = AddCheckbox(property);
 		break;
 	case OBS_PROPERTY_INT:
-		widget = AddInt(property);
+		AddInt(property, layout, &label);
 		break;
 	case OBS_PROPERTY_FLOAT:
-		widget = AddFloat(property);
+		AddFloat(property, layout, &label);
 		break;
 	case OBS_PROPERTY_TEXT:
-		widget = AddText(property);
+		widget = AddText(property, layout, label);
 		break;
 	case OBS_PROPERTY_PATH:
 		AddPath(property, layout, &label);
@@ -721,6 +817,12 @@ void WidgetInfo::ButtonClicked()
 	}
 }
 
+void WidgetInfo::TogglePasswordText(bool show)
+{
+	reinterpret_cast<QLineEdit*>(widget)->setEchoMode(
+			show ? QLineEdit::Normal : QLineEdit::Password);
+}
+
 void WidgetInfo::ControlChanged()
 {
 	const char        *setting = obs_property_name(property);
@@ -747,7 +849,7 @@ void WidgetInfo::ControlChanged()
 			return;
 	}
 
-	if (view->callback)
+	if (view->callback && !view->deferUpdate)
 		view->callback(view->obj, view->settings);
 
 	view->SignalChanged();

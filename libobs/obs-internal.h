@@ -96,6 +96,65 @@ static inline bool check_path(const char *data, const char *path,
 
 
 /* ------------------------------------------------------------------------- */
+/* hotkeys */
+
+struct obs_hotkey {
+	obs_hotkey_id               id;
+	char                        *name;
+	char                        *description;
+
+	obs_hotkey_func             func;
+	void                        *data;
+	int                         pressed;
+
+	obs_hotkey_registerer_t     registerer_type;
+	void                        *registerer;
+
+	obs_hotkey_id               pair_partner_id;
+};
+
+struct obs_hotkey_pair {
+	obs_hotkey_pair_id          pair_id;
+	obs_hotkey_id               id[2];
+	obs_hotkey_active_func      func[2];
+	bool                        pressed0 : 1;
+	bool                        pressed1 : 1;
+	void                        *data[2];
+};
+
+typedef struct obs_hotkey_pair obs_hotkey_pair_t;
+
+typedef struct obs_hotkeys_platform obs_hotkeys_platform_t;
+
+void *obs_hotkey_thread(void *param);
+
+struct obs_core_hotkeys;
+bool obs_hotkeys_platform_init(struct obs_core_hotkeys *hotkeys);
+void obs_hotkeys_platform_free(struct obs_core_hotkeys *hotkeys);
+bool obs_hotkeys_platform_is_pressed(obs_hotkeys_platform_t *context,
+		obs_key_t key);
+
+const char *obs_get_hotkey_translation(obs_key_t key, const char *def);
+
+struct obs_context_data;
+void obs_hotkeys_context_release(struct obs_context_data *context);
+
+void obs_hotkeys_free(void);
+
+struct obs_hotkey_binding {
+	obs_key_combination_t       key;
+	bool                        pressed : 1;
+	bool                        modifiers_match : 1;
+
+	obs_hotkey_id               hotkey_id;
+	obs_hotkey_t                *hotkey;
+};
+
+struct obs_hotkey_name_map;
+void obs_hotkey_name_map_free(void);
+
+
+/* ------------------------------------------------------------------------- */
 /* views */
 
 struct obs_view {
@@ -112,7 +171,9 @@ extern void obs_view_free(struct obs_view *view);
 
 struct obs_display {
 	bool                            size_changed;
+	bool                            enabled;
 	uint32_t                        cx, cy;
+	uint32_t                        background_color;
 	gs_swapchain_t                  *swap;
 	pthread_mutex_t                 draw_callbacks_mutex;
 	DARRAY(struct draw_callback)    draw_callbacks;
@@ -147,10 +208,12 @@ struct obs_core_video {
 	struct circlebuf                vframe_info_buffer;
 	gs_effect_t                     *default_effect;
 	gs_effect_t                     *default_rect_effect;
+	gs_effect_t                     *opaque_effect;
 	gs_effect_t                     *solid_effect;
 	gs_effect_t                     *conversion_effect;
 	gs_effect_t                     *bicubic_effect;
 	gs_effect_t                     *lanczos_effect;
+	gs_effect_t                     *bilinear_lowres_effect;
 	gs_stagesurf_t                  *mapped_surface;
 	int                             cur_texture;
 
@@ -209,6 +272,41 @@ struct obs_core_data {
 	volatile bool                   valid;
 };
 
+/* user hotkeys */
+struct obs_core_hotkeys {
+	pthread_mutex_t                 mutex;
+	DARRAY(obs_hotkey_t)            hotkeys;
+	obs_hotkey_id                   next_id;
+	DARRAY(obs_hotkey_pair_t)       hotkey_pairs;
+	obs_hotkey_pair_id              next_pair_id;
+
+	pthread_t                       hotkey_thread;
+	bool                            hotkey_thread_initialized;
+	os_event_t                      *stop_event;
+	bool                            thread_disable_press : 1;
+	bool                            strict_modifiers : 1;
+	bool                            reroute_hotkeys : 1;
+	DARRAY(obs_hotkey_binding_t)    bindings;
+
+	obs_hotkey_callback_router_func router_func;
+	void                            *router_func_data;
+
+	obs_hotkeys_platform_t          *platform_context;
+
+	pthread_once_t                  name_map_init_token;
+	struct obs_hotkey_name_map      *name_map;
+
+	signal_handler_t                *signals;
+
+	char                            *translations[OBS_KEY_LAST_VALUE];
+	char                            *mute;
+	char                            *unmute;
+	char                            *push_to_mute;
+	char                            *push_to_talk;
+	char                            *sceneitem_show;
+	char                            *sceneitem_hide;
+};
+
 struct obs_core {
 	struct obs_module               *first_module;
 	DARRAY(struct obs_module_path)  module_paths;
@@ -232,6 +330,7 @@ struct obs_core {
 	struct obs_core_video           video;
 	struct obs_core_audio           audio;
 	struct obs_core_data            data;
+	struct obs_core_hotkeys         hotkeys;
 };
 
 extern struct obs_core *obs;
@@ -249,6 +348,10 @@ struct obs_context_data {
 	signal_handler_t                *signals;
 	proc_handler_t                  *procs;
 
+	DARRAY(obs_hotkey_id)           hotkeys;
+	DARRAY(obs_hotkey_pair_id)      hotkey_pairs;
+	obs_data_t                      *hotkey_data;
+
 	DARRAY(char*)                   rename_cache;
 	pthread_mutex_t                 rename_cache_mutex;
 
@@ -260,7 +363,8 @@ struct obs_context_data {
 extern bool obs_context_data_init(
 		struct obs_context_data *context,
 		obs_data_t              *settings,
-		const char              *name);
+		const char              *name,
+		obs_data_t              *hotkey_data);
 extern void obs_context_data_free(struct obs_context_data *context);
 
 extern void obs_context_data_insert(struct obs_context_data *context,
@@ -272,17 +376,65 @@ extern void obs_context_data_setname(struct obs_context_data *context,
 
 
 /* ------------------------------------------------------------------------- */
+/* ref-counting  */
+
+struct obs_weak_ref {
+	volatile long refs;
+	volatile long weak_refs;
+};
+
+static inline void obs_ref_addref(struct obs_weak_ref *ref)
+{
+	os_atomic_inc_long(&ref->refs);
+}
+
+static inline bool obs_ref_release(struct obs_weak_ref *ref)
+{
+	return os_atomic_dec_long(&ref->refs) == -1;
+}
+
+static inline void obs_weak_ref_addref(struct obs_weak_ref *ref)
+{
+	os_atomic_inc_long(&ref->weak_refs);
+}
+
+static inline bool obs_weak_ref_release(struct obs_weak_ref *ref)
+{
+	return os_atomic_dec_long(&ref->weak_refs) == -1;
+}
+
+static inline bool obs_weak_ref_get_ref(struct obs_weak_ref *ref)
+{
+	long owners = ref->refs;
+	while (owners > -1) {
+		if (os_atomic_compare_swap_long(&ref->refs, owners, owners + 1))
+			return true;
+
+		owners = ref->refs;
+	}
+
+	return false;
+}
+
+
+/* ------------------------------------------------------------------------- */
 /* sources  */
 
 struct async_frame {
 	struct obs_source_frame *frame;
+	long unused_count;
 	bool used;
+};
+
+struct obs_weak_source {
+	struct obs_weak_ref ref;
+	struct obs_source *source;
 };
 
 struct obs_source {
 	struct obs_context_data         context;
 	struct obs_source_info          info;
-	volatile long                   refs;
+	struct obs_weak_source          *control;
 
 	/* general exposed flags that can be set for the source */
 	uint32_t                        flags;
@@ -305,6 +457,12 @@ struct obs_source {
 	 * to handle things but it's the best option) */
 	bool                            removed;
 
+	bool                            active;
+	bool                            showing;
+
+	/* used to temporarily disable sources if needed */
+	bool                            enabled;
+
 	/* timing (if video is present, is based upon video) */
 	volatile bool                   timing_set;
 	volatile uint64_t               timing_adjust;
@@ -315,6 +473,7 @@ struct obs_source {
 
 	/* audio */
 	bool                            audio_failed;
+	bool                            muted;
 	struct resample_info            sample_info;
 	audio_resampler_t               *resampler;
 	audio_line_t                    *audio_line;
@@ -329,8 +488,10 @@ struct obs_source {
 	/* async video data */
 	gs_texture_t                    *async_texture;
 	gs_texrender_t                  *async_convert_texrender;
+	struct obs_source_frame         *cur_async_frame;
 	bool                            async_gpu_conversion;
 	enum video_format               async_format;
+	enum video_format               async_cache_format;
 	enum gs_color_format            async_texture_format;
 	float                           async_color_matrix[16];
 	bool                            async_full_range;
@@ -339,12 +500,13 @@ struct obs_source {
 	int                             async_plane_offset[2];
 	bool                            async_flip;
 	bool                            async_active;
-	bool                            async_reset_texture;
 	DARRAY(struct async_frame)      async_cache;
 	DARRAY(struct obs_source_frame*)async_frames;
 	pthread_mutex_t                 async_mutex;
 	uint32_t                        async_width;
 	uint32_t                        async_height;
+	uint32_t                        async_cache_width;
+	uint32_t                        async_cache_height;
 	uint32_t                        async_convert_width;
 	uint32_t                        async_convert_height;
 
@@ -354,13 +516,28 @@ struct obs_source {
 	DARRAY(struct obs_source*)      filters;
 	pthread_mutex_t                 filter_mutex;
 	gs_texrender_t                  *filter_texrender;
+	enum obs_allow_direct_render    allow_direct;
 	bool                            rendering_filter;
+
+	/* sources specific hotkeys */
+	obs_hotkey_pair_id              mute_unmute_key;
+	obs_hotkey_id                   push_to_mute_key;
+	obs_hotkey_id                   push_to_talk_key;
+	bool                            push_to_mute_enabled : 1;
+	bool                            push_to_mute_pressed : 1;
+	bool                            push_to_talk_enabled : 1;
+	bool                            push_to_talk_pressed : 1;
+	uint64_t                        push_to_mute_delay;
+	uint64_t                        push_to_mute_stop_time;
+	uint64_t                        push_to_talk_delay;
+	uint64_t                        push_to_talk_stop_time;
 };
 
 extern const struct obs_source_info *find_source(struct darray *list,
 		const char *id);
 extern bool obs_source_init_context(struct obs_source *source,
-		obs_data_t *settings, const char *name);
+		obs_data_t *settings, const char *name,
+		obs_data_t *hotkey_data);
 extern bool obs_source_init(struct obs_source *source,
 		const struct obs_source_info *info);
 
@@ -381,9 +558,15 @@ extern float obs_source_get_target_volume(obs_source_t *source,
 /* ------------------------------------------------------------------------- */
 /* outputs  */
 
+struct obs_weak_output {
+	struct obs_weak_ref ref;
+	struct obs_output *output;
+};
+
 struct obs_output {
 	struct obs_context_data         context;
 	struct obs_output_info          info;
+	struct obs_weak_output          *control;
 
 	bool                            received_video;
 	bool                            received_audio;
@@ -397,6 +580,7 @@ struct obs_output {
 	int                             reconnect_retry_sec;
 	int                             reconnect_retry_max;
 	int                             reconnect_retries;
+	int                             reconnect_retry_cur_sec;
 	bool                            reconnecting;
 	pthread_t                       reconnect_thread;
 	os_event_t                      *reconnect_stop_event;
@@ -432,9 +616,16 @@ extern const struct obs_output_info *find_output(const char *id);
 extern void obs_output_remove_encoder(struct obs_output *output,
 		struct obs_encoder *encoder);
 
+void obs_output_destroy(obs_output_t *output);
+
 
 /* ------------------------------------------------------------------------- */
 /* encoders  */
+
+struct obs_weak_encoder {
+	struct obs_weak_ref ref;
+	struct obs_encoder *encoder;
+};
 
 struct encoder_callback {
 	bool sent_first_packet;
@@ -445,6 +636,7 @@ struct encoder_callback {
 struct obs_encoder {
 	struct obs_context_data         context;
 	struct obs_encoder_info         info;
+	struct obs_weak_encoder         *control;
 
 	uint32_t                        samplerate;
 	size_t                          planes;
@@ -456,6 +648,7 @@ struct obs_encoder {
 
 	uint32_t                        scaled_width;
 	uint32_t                        scaled_height;
+	enum video_format               preferred_format;
 
 	bool                            active;
 
@@ -503,12 +696,20 @@ extern void obs_encoder_add_output(struct obs_encoder *encoder,
 extern void obs_encoder_remove_output(struct obs_encoder *encoder,
 		struct obs_output *output);
 
+void obs_encoder_destroy(obs_encoder_t *encoder);
+
 /* ------------------------------------------------------------------------- */
 /* services */
+
+struct obs_weak_service {
+	struct obs_weak_ref ref;
+	struct obs_service *service;
+};
 
 struct obs_service {
 	struct obs_context_data         context;
 	struct obs_service_info         info;
+	struct obs_weak_service         *control;
 
 	bool                            active;
 	bool                            destroy;
@@ -521,3 +722,6 @@ extern void obs_service_activate(struct obs_service *service);
 extern void obs_service_deactivate(struct obs_service *service, bool remove);
 extern bool obs_service_initialize(struct obs_service *service,
 		struct obs_output *output);
+
+void obs_service_destroy(obs_service_t *service);
+

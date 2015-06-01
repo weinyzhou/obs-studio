@@ -5,6 +5,7 @@
 #include <vector>
 
 class OBSAdvAudioCtrl;
+class QGridLayout;
 
 // "Basic advanced audio"?  ...
 
@@ -13,6 +14,7 @@ class OBSBasicAdvAudio : public QDialog {
 
 private:
 	QWidget *controlArea;
+	QGridLayout *mainLayout;
 	OBSSignal sourceAddedSignal;
 	OBSSignal sourceRemovedSignal;
 
@@ -31,4 +33,5 @@ public slots:
 
 public:
 	OBSBasicAdvAudio(QWidget *parent);
+	~OBSBasicAdvAudio();
 };

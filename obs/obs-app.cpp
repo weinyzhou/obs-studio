@@ -29,6 +29,7 @@
 #include "qt-wrappers.hpp"
 #include "obs-app.hpp"
 #include "window-basic-main.hpp"
+#include "window-basic-settings.hpp"
 #include "window-license-agreement.hpp"
 #include "crash-report.hpp"
 #include "platform.hpp"
@@ -37,7 +38,9 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#if _MSC_VER < 1900
 #define snprintf _snprintf
+#endif
 #else
 #include <signal.h>
 #endif
@@ -48,6 +51,112 @@ static log_handler_t def_log_handler;
 
 static string currentLogFile;
 static string lastLogFile;
+
+QObject *CreateShortcutFilter()
+{
+	return new OBSEventFilter([](QObject *, QEvent *event)
+	{
+		auto mouse_event = [](QMouseEvent &event)
+		{
+			obs_key_combination_t hotkey = {0, OBS_KEY_NONE};
+			bool pressed = event.type() == QEvent::MouseButtonPress;
+
+			switch (event.button()) {
+			case Qt::NoButton:
+			case Qt::LeftButton:
+			case Qt::RightButton:
+			case Qt::AllButtons:
+			case Qt::MouseButtonMask:
+				return false;
+
+			case Qt::MidButton:
+				hotkey.key = OBS_KEY_MOUSE3;
+				break;
+
+#define MAP_BUTTON(i, j) case Qt::ExtraButton ## i: \
+		hotkey.key = OBS_KEY_MOUSE ## j; break;
+			MAP_BUTTON( 1,  4);
+			MAP_BUTTON( 2,  5);
+			MAP_BUTTON( 3,  6);
+			MAP_BUTTON( 4,  7);
+			MAP_BUTTON( 5,  8);
+			MAP_BUTTON( 6,  9);
+			MAP_BUTTON( 7, 10);
+			MAP_BUTTON( 8, 11);
+			MAP_BUTTON( 9, 12);
+			MAP_BUTTON(10, 13);
+			MAP_BUTTON(11, 14);
+			MAP_BUTTON(12, 15);
+			MAP_BUTTON(13, 16);
+			MAP_BUTTON(14, 17);
+			MAP_BUTTON(15, 18);
+			MAP_BUTTON(16, 19);
+			MAP_BUTTON(17, 20);
+			MAP_BUTTON(18, 21);
+			MAP_BUTTON(19, 22);
+			MAP_BUTTON(20, 23);
+			MAP_BUTTON(21, 24);
+			MAP_BUTTON(22, 25);
+			MAP_BUTTON(23, 26);
+			MAP_BUTTON(24, 27);
+#undef MAP_BUTTON
+			}
+
+			hotkey.modifiers = TranslateQtKeyboardEventModifiers(
+							event.modifiers());
+
+			obs_hotkey_inject_event(hotkey, pressed);
+			return true;
+		};
+
+		auto key_event = [](QKeyEvent *event)
+		{
+			obs_key_combination_t hotkey = {0, OBS_KEY_NONE};
+			bool pressed = event->type() == QEvent::KeyPress;
+
+			switch (event->key()) {
+			case Qt::Key_Shift:
+			case Qt::Key_Control:
+			case Qt::Key_Alt:
+			case Qt::Key_Meta:
+				break;
+
+#ifdef __APPLE__
+			case Qt::Key_CapsLock:
+				// kVK_CapsLock == 57
+				hotkey.key = obs_key_from_virtual_key(57);
+				pressed = true;
+				break;
+#endif
+
+			default:
+				hotkey.key = obs_key_from_virtual_key(
+					event->nativeVirtualKey());
+			}
+
+			hotkey.modifiers = TranslateQtKeyboardEventModifiers(
+							event->modifiers());
+
+			obs_hotkey_inject_event(hotkey, pressed);
+		};
+
+		switch (event->type()) {
+		case QEvent::MouseButtonPress:
+		case QEvent::MouseButtonRelease:
+			return mouse_event(*static_cast<QMouseEvent*>(event));
+
+		/*case QEvent::MouseButtonDblClick:
+		case QEvent::Wheel:*/
+		case QEvent::KeyPress:
+		case QEvent::KeyRelease:
+			key_event(static_cast<QKeyEvent*>(event));
+			return true;
+
+		default:
+			return false;
+		}
+	});
+}
 
 string CurrentTimeString()
 {
@@ -112,6 +221,8 @@ bool OBSApp::InitGlobalConfigDefaults()
 	config_set_default_string(globalConfig, "Video", "Renderer", "OpenGL");
 #endif
 
+	config_set_default_bool(globalConfig, "BasicWindow", "PreviewEnabled",
+			true);
 	return true;
 }
 
@@ -143,6 +254,13 @@ static bool MakeUserDirs()
 		return false;
 	if (!do_mkdir(path))
 		return false;
+
+#ifdef _WIN32
+	if (os_get_config_path(path, sizeof(path), "obs-studio/crashes") <= 0)
+		return false;
+	if (!do_mkdir(path))
+		return false;
+#endif
 
 	return true;
 }
@@ -233,6 +351,44 @@ bool OBSApp::InitLocale()
 	return true;
 }
 
+bool OBSApp::SetTheme(std::string name, std::string path)
+{
+	theme = name;
+
+	/* Check user dir first, then preinstalled themes. */
+	if (path == "") {
+		char userDir[512];
+		name = "themes/" + name + ".qss";
+		string temp = "obs-studio/" + name;
+		int ret = os_get_config_path(userDir, sizeof(userDir),
+				temp.c_str());
+
+		if (ret > 0 && QFile::exists(userDir)) {
+			path = string(userDir);
+		} else if (!GetDataFilePath(name.c_str(), path)) {
+			OBSErrorBox(NULL, "Failed to find %s.", name.c_str());
+			return false;
+		}
+	}
+
+	QString mpath = QString("file:///") + path.c_str();
+	setStyleSheet(mpath);
+	return true;
+}
+
+bool OBSApp::InitTheme()
+{
+	const char *themeName = config_get_string(globalConfig, "General",
+			"Theme");
+
+	if (!themeName)
+		themeName = "Default";
+
+	stringstream t;
+	t << themeName;
+	return SetTheme(t.str());
+}
+
 OBSApp::OBSApp(int &argc, char **argv)
 	: QApplication(argc, argv)
 {}
@@ -247,6 +403,8 @@ void OBSApp::AppInit()
 		throw "Failed to initialize global config";
 	if (!InitLocale())
 		throw "Failed to load locale";
+	if (!InitTheme())
+		throw "Failed to load theme";
 }
 
 const char *OBSApp::GetRenderModule() const
@@ -278,6 +436,14 @@ bool OBSApp::OBSInit()
 
 		mainWindow->OBSInit();
 
+		connect(this, &QGuiApplication::applicationStateChanged,
+				[](Qt::ApplicationState state)
+				{
+					obs_hotkey_enable_background_press(
+						state != Qt::ApplicationActive);
+				});
+		obs_hotkey_enable_background_press(
+				applicationState() != Qt::ApplicationActive);
 		return true;
 	} else {
 		return false;
@@ -305,6 +471,8 @@ string OBSApp::GetVersionString() const
 	ver << "windows)";
 #elif __APPLE__
 	ver << "mac)";
+#elif __FreeBSD__
+	ver << "freebsd)";
 #else /* assume linux for the time being */
 	ver << "linux)";
 #endif
@@ -356,19 +524,6 @@ QString OBSTranslator::translate(const char *context, const char *sourceText,
 	return QT_UTF8(out);
 }
 
-struct NoFocusFrameStyle : QProxyStyle
-{
-	void drawControl(ControlElement element, const QStyleOption *option,
-			QPainter *painter, const QWidget *widget=nullptr)
-		const override
-	{
-		if (element == CE_FocusFrame)
-			return;
-
-		QProxyStyle::drawControl(element, option, painter, widget);
-	}
-};
-
 static bool get_token(lexer *lex, string &str, base_token_type type)
 {
 	base_token token;
@@ -415,9 +570,9 @@ static uint64_t convert_log_name(const char *name)
 	return std::stoull(timestring.str());
 }
 
-static void delete_oldest_log(void)
+static void delete_oldest_file(const char *location)
 {
-	BPtr<char>       logDir(os_get_config_path_ptr("obs-studio/logs"));
+	BPtr<char>       logDir(os_get_config_path_ptr(location));
 	string           oldestLog;
 	uint64_t         oldest_ts = (uint64_t)-1;
 	struct os_dirent *entry;
@@ -536,7 +691,7 @@ static void create_log_file(fstream &logFile)
 			ios_base::in | ios_base::out | ios_base::trunc);
 
 	if (logFile.is_open()) {
-		delete_oldest_log();
+		delete_oldest_file("obs-studio/logs");
 		base_set_log_handler(do_log, &logFile);
 	} else {
 		blog(LOG_ERROR, "Failed to open log file");
@@ -557,7 +712,6 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 		create_log_file(logFile);
 
 		program.installTranslator(&translator);
-		program.setStyle(new NoFocusFrameStyle);
 
 		ret = program.OBSInit() ? program.exec() : 0;
 
@@ -571,24 +725,55 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 
 #define MAX_CRASH_REPORT_SIZE (50 * 1024)
 
+#ifdef _WIN32
+
+#define CRASH_MESSAGE \
+	"Woops, OBS has crashed!\n\nWould you like to copy the crash log " \
+	"to the clipboard?  (Crash logs will still be saved to the " \
+	"%appdata%\\obs-studio\\crashes directory)"
+
 static void main_crash_handler(const char *format, va_list args, void *param)
 {
-	char *test = new char[MAX_CRASH_REPORT_SIZE];
+	char *text = new char[MAX_CRASH_REPORT_SIZE];
 
-	vsnprintf(test, MAX_CRASH_REPORT_SIZE, format, args);
+	vsnprintf(text, MAX_CRASH_REPORT_SIZE, format, args);
 
-	OBSCrashReport crashReport(nullptr, test);
-	crashReport.exec();
+	delete_oldest_file("obs-studio/crashes");
+
+	string name = "obs-studio/crashes/Crash ";
+	name += GenerateTimeDateFilename("txt");
+
+	BPtr<char> path(os_get_config_path_ptr(name.c_str()));
+
+	fstream file;
+	file.open(path, ios_base::in | ios_base::out | ios_base::trunc);
+	file << text;
+	file.close();
+
+	int ret = MessageBoxA(NULL, CRASH_MESSAGE, "OBS has crashed!",
+			MB_YESNO | MB_ICONERROR | MB_TASKMODAL);
+
+	if (ret == IDYES) {
+		size_t len = strlen(text);
+
+		HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, len);
+		memcpy(GlobalLock(mem), text, len);
+		GlobalUnlock(mem);
+
+		OpenClipboard(0);
+		EmptyClipboard();
+		SetClipboardData(CF_TEXT, mem);
+		CloseClipboard();
+	}
+
 	exit(-1);
 
 	UNUSED_PARAMETER(param);
 }
 
-#ifdef _WIN32
 static void load_debug_privilege(void)
 {
 	const DWORD flags = TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY;
-	bool success = false;
 	TOKEN_PRIVILEGES tp;
 	HANDLE token;
 	LUID val;
@@ -602,7 +787,7 @@ static void load_debug_privilege(void)
 		tp.Privileges[0].Luid = val;
 		tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
 
-		success = !!AdjustTokenPrivileges(token, false, &tp,
+		AdjustTokenPrivileges(token, false, &tp,
 				sizeof(tp), NULL, NULL);
 	}
 
@@ -612,15 +797,15 @@ static void load_debug_privilege(void)
 
 int main(int argc, char *argv[])
 {
-#ifndef WIN32
+#ifndef _WIN32
 	signal(SIGPIPE, SIG_IGN);
 #endif
 
 #ifdef _WIN32
 	load_debug_privilege();
+	base_set_crash_handler(main_crash_handler, nullptr);
 #endif
 
-	base_set_crash_handler(main_crash_handler, nullptr);
 	base_get_log_handler(&def_log_handler, nullptr);
 
 	fstream logFile;

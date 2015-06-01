@@ -46,6 +46,9 @@ enum video_format {
 	VIDEO_FORMAT_RGBA,
 	VIDEO_FORMAT_BGRA,
 	VIDEO_FORMAT_BGRX,
+
+	/* planar 4:4:4 */
+	VIDEO_FORMAT_I444,
 };
 
 enum video_colorspace {
@@ -88,6 +91,7 @@ static inline bool format_is_yuv(enum video_format format)
 	case VIDEO_FORMAT_YVYU:
 	case VIDEO_FORMAT_YUY2:
 	case VIDEO_FORMAT_UYVY:
+	case VIDEO_FORMAT_I444:
 		return true;
 	case VIDEO_FORMAT_NONE:
 	case VIDEO_FORMAT_RGBA:
@@ -97,6 +101,24 @@ static inline bool format_is_yuv(enum video_format format)
 	}
 
 	return false;
+}
+
+static inline const char *get_video_format_name(enum video_format format)
+{
+	switch (format) {
+	case VIDEO_FORMAT_I420: return "I420";
+	case VIDEO_FORMAT_NV12: return "NV12";
+	case VIDEO_FORMAT_YVYU: return "YVYU";
+	case VIDEO_FORMAT_YUY2: return "YUY2";
+	case VIDEO_FORMAT_UYVY: return "UYVY";
+	case VIDEO_FORMAT_RGBA: return "RGBA";
+	case VIDEO_FORMAT_BGRA: return "BGRA";
+	case VIDEO_FORMAT_BGRX: return "BGRX";
+	case VIDEO_FORMAT_I444: return "I444";
+	case VIDEO_FORMAT_NONE:;
+	}
+
+	return "None";
 }
 
 enum video_scale_type {

@@ -264,6 +264,7 @@ static void *send_thread(void *data)
 	}
 
 	stream->active = false;
+	stream->sent_headers = false;
 	return NULL;
 }
 
@@ -462,6 +463,8 @@ static bool rtmp_stream_start(void *data)
 
 	stream->total_bytes_sent = 0;
 	stream->dropped_frames   = 0;
+	stream->min_drop_dts_usec= 0;
+	stream->min_priority     = 0;
 
 	settings = obs_output_get_settings(stream->output);
 	dstr_copy(&stream->path,     obs_service_get_url(service));
@@ -507,7 +510,9 @@ static void drop_frames(struct rtmp_stream *stream)
 
 		last_drop_dts_usec = packet.dts_usec;
 
-		if (packet.type == OBS_ENCODER_AUDIO) {
+		/* do not drop audio data or video keyframes */
+		if (packet.type          == OBS_ENCODER_AUDIO ||
+		    packet.drop_priority == OBS_NAL_PRIORITY_HIGHEST) {
 			circlebuf_push_back(&new_buf, &packet, sizeof(packet));
 
 		} else {

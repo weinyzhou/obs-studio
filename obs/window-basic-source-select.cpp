@@ -111,7 +111,7 @@ bool AddNew(QWidget *parent, const char *id, const char *name)
 
 	} else {
 		source = obs_source_create(OBS_SOURCE_TYPE_INPUT,
-				id, name, NULL);
+				id, name, NULL, nullptr);
 
 		if (source) {
 			obs_add_source(source);
@@ -164,6 +164,8 @@ OBSBasicSourceSelect::OBSBasicSourceSelect(OBSBasic *parent, const char *id_)
 {
 	ui->setupUi(this);
 
+	ui->sourceList->setAttribute(Qt::WA_MacShowFocusRect, false);
+
 	QString placeHolderText{QT_UTF8(obs_source_get_display_name(
 				OBS_SOURCE_TYPE_INPUT, id))};
 
@@ -178,6 +180,8 @@ OBSBasicSourceSelect::OBSBasicSourceSelect(OBSBasic *parent, const char *id_)
 	ui->sourceName->setText(text);
 	ui->sourceName->setFocus();	//Fixes deselect of text.
 	ui->sourceName->selectAll();
+
+	installEventFilter(CreateShortcutFilter());
 
 	obs_enum_sources(EnumSources, this);
 }

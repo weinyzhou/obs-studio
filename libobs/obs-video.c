@@ -70,8 +70,7 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 	/* call the tick function of each source */
 	source = data->first_source;
 	while (source) {
-		if (source->refs)
-			obs_source_video_tick(source, seconds);
+		obs_source_video_tick(source, seconds);
 		source = (struct obs_source*)source->context.next;
 	}
 
@@ -80,8 +79,7 @@ static uint64_t tick_sources(uint64_t cur_time, uint64_t last_time)
 
 	source = data->first_source;
 	while (source) {
-		if (source->refs)
-			calculate_base_volume(data, view, source);
+		calculate_base_volume(data, view, source);
 		source = (struct obs_source*)source->context.next;
 	}
 
@@ -156,6 +154,14 @@ static inline void render_main_texture(struct obs_core_video *video,
 static inline gs_effect_t *get_scale_effect_internal(
 		struct obs_core_video *video)
 {
+	/* if the dimension is under half the size of the original image,
+	 * bicubic/lanczos can't sample enough pixels to create an accurate
+	 * image, so use the bilinear low resolution effect instead */
+	if (video->output_width  < (video->base_width  / 2) &&
+	    video->output_height < (video->base_height / 2)) {
+		return video->bilinear_lowres_effect;
+	}
+
 	switch (video->scale_type) {
 	case OBS_SCALE_BILINEAR: return video->default_effect;
 	case OBS_SCALE_LANCZOS:  return video->lanczos_effect;
@@ -449,8 +455,28 @@ static void convert_frame(
 				0, info->height,
 				output->data, output->linesize);
 
+	} else if (info->format == VIDEO_FORMAT_I444) {
+		convert_uyvx_to_i444(
+				input->data[0], input->linesize[0],
+				0, info->height,
+				output->data, output->linesize);
+
 	} else {
 		blog(LOG_ERROR, "convert_frame: unsupported texture format");
+	}
+}
+
+static inline void copy_rgbx_frame(
+		struct video_frame *output, const struct video_data *input,
+		const struct video_output_info *info)
+{
+	uint8_t *in_ptr = input->data[0];
+	uint8_t *out_ptr = output->data[0];
+
+	for (size_t y = 0; y < info->height; y++) {
+		memcpy(out_ptr, in_ptr, info->width * 4);
+		in_ptr += input->linesize[0];
+		out_ptr += output->linesize[0];
 	}
 }
 
@@ -472,6 +498,8 @@ static inline void output_video_data(struct obs_core_video *video,
 
 		} else if (format_is_yuv(info->format)) {
 			convert_frame(&output_frame, input_frame, info);
+		} else {
+			copy_rgbx_frame(&output_frame, input_frame, info);
 		}
 
 		video_output_unlock_frame(video->video);

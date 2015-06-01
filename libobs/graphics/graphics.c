@@ -121,12 +121,17 @@ static bool graphics_init(struct graphics_subsystem *graphics)
 		return false;
 	if (pthread_mutex_init(&graphics->mutex, NULL) != 0)
 		return false;
+	if (pthread_mutex_init(&graphics->effect_mutex, NULL) != 0)
+		return false;
 
-	graphics->exports.device_blend_function(graphics->device,
-			GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+	graphics->exports.device_blend_function_separate(graphics->device,
+			GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA,
+			GS_BLEND_ONE, GS_BLEND_ONE);
 	graphics->cur_blend_state.enabled = true;
-	graphics->cur_blend_state.src     = GS_BLEND_SRCALPHA;
-	graphics->cur_blend_state.dest    = GS_BLEND_INVSRCALPHA;
+	graphics->cur_blend_state.src_c   = GS_BLEND_SRCALPHA;
+	graphics->cur_blend_state.dest_c  = GS_BLEND_INVSRCALPHA;
+	graphics->cur_blend_state.src_a   = GS_BLEND_ONE;
+	graphics->cur_blend_state.dest_a  = GS_BLEND_ONE;
 
 	graphics->exports.device_leave_context(graphics->device);
 
@@ -142,6 +147,7 @@ int gs_create(graphics_t **pgraphics, const char *module,
 
 	graphics_t *graphics = bzalloc(sizeof(struct graphics_subsystem));
 	pthread_mutex_init_value(&graphics->mutex);
+	pthread_mutex_init_value(&graphics->effect_mutex);
 
 	if (!new_data.num_backbuffers)
 		new_data.num_backbuffers = 1;
@@ -173,6 +179,8 @@ error:
 	return errcode;
 }
 
+extern void gs_effect_actually_destroy(gs_effect_t *effect);
+
 void gs_destroy(graphics_t *graphics)
 {
 	if (!graphics)
@@ -182,17 +190,31 @@ void gs_destroy(graphics_t *graphics)
 		gs_leave_context();
 
 	if (graphics->device) {
+		struct gs_effect *effect = graphics->first_effect;
+
+		thread_graphics = graphics;
 		graphics->exports.device_enter_context(graphics->device);
+
+		while (effect) {
+			struct gs_effect *next = effect->next;
+			gs_effect_actually_destroy(effect);
+			effect = next;
+		}
+
 		graphics->exports.gs_vertexbuffer_destroy(
 				graphics->sprite_buffer);
 		graphics->exports.gs_vertexbuffer_destroy(
 				graphics->immediate_vertbuffer);
 		graphics->exports.device_destroy(graphics->device);
+
+		thread_graphics = NULL;
 	}
 
 	pthread_mutex_destroy(&graphics->mutex);
+	pthread_mutex_destroy(&graphics->effect_mutex);
 	da_free(graphics->matrix_stack);
 	da_free(graphics->viewport_stack);
+	da_free(graphics->blend_state_stack);
 	if (graphics->module)
 		os_dlclose(graphics->module);
 	bfree(graphics);
@@ -644,6 +666,19 @@ gs_effect_t *gs_get_effect(void)
 	return thread_graphics ? thread_graphics->cur_effect : NULL;
 }
 
+static inline struct gs_effect *find_cached_effect(const char *filename)
+{
+	struct gs_effect *effect = thread_graphics->first_effect;
+
+	while (effect) {
+		if (strcmp(effect->effect_path, filename) == 0)
+			break;
+		effect = effect->next;
+	}
+
+	return effect;
+}
+
 gs_effect_t *gs_effect_create_from_file(const char *file, char **error_string)
 {
 	char *file_string;
@@ -651,6 +686,10 @@ gs_effect_t *gs_effect_create_from_file(const char *file, char **error_string)
 
 	if (!thread_graphics || !file)
 		return NULL;
+
+	effect = find_cached_effect(file);
+	if (effect)
+		return effect;
 
 	file_string = os_quick_read_utf8_file(file);
 	if (!file_string) {
@@ -675,6 +714,7 @@ gs_effect_t *gs_effect_create(const char *effect_string, const char *filename,
 	bool success;
 
 	effect->graphics = thread_graphics;
+	effect->effect_path = bstrdup(filename);
 
 	ep_init(&parser);
 	success = ep_parse(&parser, effect, effect_string, filename);
@@ -684,6 +724,18 @@ gs_effect_t *gs_effect_create(const char *effect_string, const char *filename,
 					&parser.cfp.error_list);
 		gs_effect_destroy(effect);
 		effect = NULL;
+	}
+
+	if (effect) {
+		pthread_mutex_lock(&thread_graphics->effect_mutex);
+
+		if (effect->effect_path) {
+			effect->cached = true;
+			effect->next = thread_graphics->first_effect;
+			thread_graphics->first_effect = effect;
+		}
+
+		pthread_mutex_unlock(&thread_graphics->effect_mutex);
 	}
 
 	ep_free(&parser);
@@ -953,6 +1005,32 @@ void gs_perspective(float angle, float aspect, float near, float far)
 			ymin, ymax, near, far);
 }
 
+void gs_blend_state_push(void)
+{
+	graphics_t *graphics = thread_graphics;
+	if (!graphics) return;
+
+	da_push_back(graphics->blend_state_stack, &graphics->cur_blend_state);
+}
+
+void gs_blend_state_pop(void)
+{
+	graphics_t *graphics = thread_graphics;
+	struct blend_state *state;
+
+	if (!graphics) return;
+
+	state = da_end(graphics->blend_state_stack);
+	if (!state)
+		return;
+
+	gs_enable_blending(state->enabled);
+	gs_blend_function_separate(state->src_c, state->dest_c,
+			state->src_a, state->dest_a);
+
+	da_pop_back(graphics->blend_state_stack);
+}
+
 void gs_reset_blend_state(void)
 {
 	graphics_t *graphics = thread_graphics;
@@ -961,9 +1039,13 @@ void gs_reset_blend_state(void)
 	if (!graphics->cur_blend_state.enabled)
 		gs_enable_blending(true);
 
-	if (graphics->cur_blend_state.src  != GS_BLEND_SRCALPHA ||
-	    graphics->cur_blend_state.dest != GS_BLEND_INVSRCALPHA)
-		gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+	if (graphics->cur_blend_state.src_c  != GS_BLEND_SRCALPHA ||
+	    graphics->cur_blend_state.dest_c != GS_BLEND_INVSRCALPHA ||
+	    graphics->cur_blend_state.src_a  != GS_BLEND_ONE ||
+	    graphics->cur_blend_state.dest_a != GS_BLEND_ONE)
+		gs_blend_function_separate(
+				GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA,
+				GS_BLEND_ONE, GS_BLEND_ONE);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1443,9 +1525,26 @@ void gs_blend_function(enum gs_blend_type src, enum gs_blend_type dest)
 	graphics_t *graphics = thread_graphics;
 	if (!graphics) return;
 
-	graphics->cur_blend_state.src  = src;
-	graphics->cur_blend_state.dest = dest;
+	graphics->cur_blend_state.src_c  = src;
+	graphics->cur_blend_state.dest_c = dest;
+	graphics->cur_blend_state.src_a  = src;
+	graphics->cur_blend_state.dest_a = dest;
 	graphics->exports.device_blend_function(graphics->device, src, dest);
+}
+
+void gs_blend_function_separate(
+		enum gs_blend_type src_c, enum gs_blend_type dest_c,
+		enum gs_blend_type src_a, enum gs_blend_type dest_a)
+{
+	graphics_t *graphics = thread_graphics;
+	if (!graphics) return;
+
+	graphics->cur_blend_state.src_c  = src_c;
+	graphics->cur_blend_state.dest_c = dest_c;
+	graphics->cur_blend_state.src_a  = src_a;
+	graphics->cur_blend_state.dest_a = dest_a;
+	graphics->exports.device_blend_function_separate(graphics->device,
+			src_c, dest_c, src_a, dest_a);
 }
 
 void gs_depth_function(enum gs_depth_test test)

@@ -1,5 +1,6 @@
 /******************************************************************************
-    Copyright (C) 2013 by Hugh Bailey <obs.jim@gmail.com>
+    Copyright (C) 2013-2015 by Hugh Bailey <obs.jim@gmail.com>
+                               Philippe Groarke <philippe.groarke@gmail.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -22,10 +23,8 @@
 static const char *obs_scene_signals[] = {
 	"void item_add(ptr scene, ptr item)",
 	"void item_remove(ptr scene, ptr item)",
-	"void item_move_up(ptr scene, ptr item)",
-	"void item_move_down(ptr scene, ptr item)",
-	"void item_move_top(ptr scene, ptr item)",
-	"void item_move_bottom(ptr scene, ptr item)",
+	"void reorder(ptr scene)",
+	"void item_visible(ptr scene, ptr item, bool visible)",
 	"void item_select(ptr scene, ptr item)",
 	"void item_deselect(ptr scene, ptr item)",
 	"void item_transform(ptr scene, ptr item)",
@@ -152,8 +151,10 @@ static inline void attach_sceneitem(struct obs_scene *parent,
 			prev->next->prev = item;
 		prev->next = item;
 	} else {
-		item->next = item->parent->first_item;
-		item->parent->first_item = item;
+		item->next = parent->first_item;
+		if (parent->first_item)
+			parent->first_item->prev = item;
+		parent->first_item = item;
 	}
 }
 
@@ -306,6 +307,9 @@ static void scene_video_render(void *data, gs_effect_t *effect)
 
 	item = scene->first_item;
 
+	gs_blend_state_push();
+	gs_reset_blend_state();
+
 	while (item) {
 		if (obs_source_removed(item->source)) {
 			struct obs_scene_item *del_item = item;
@@ -318,13 +322,17 @@ static void scene_video_render(void *data, gs_effect_t *effect)
 		if (source_size_changed(item))
 			update_item_transform(item);
 
-		gs_matrix_push();
-		gs_matrix_mul(&item->draw_transform);
-		obs_source_video_render(item->source);
-		gs_matrix_pop();
+		if (item->visible) {
+			gs_matrix_push();
+			gs_matrix_mul(&item->draw_transform);
+			obs_source_video_render(item->source);
+			gs_matrix_pop();
+		}
 
 		item = item->next;
 	}
+
+	gs_blend_state_pop();
 
 	pthread_mutex_unlock(&scene->mutex);
 
@@ -344,6 +352,14 @@ static void scene_load_item(struct obs_scene *scene, obs_data_t *item_data)
 	}
 
 	item = obs_scene_add(scene, source);
+	if (!item) {
+		blog(LOG_WARNING, "[scene_load_item] Could not add source '%s' "
+		                  "to scene '%s'!",
+		                  name, obs_source_get_name(scene->source));
+		
+		obs_source_release(source);
+		return;
+	}
 
 	obs_data_set_default_int(item_data, "align",
 			OBS_ALIGN_TOP | OBS_ALIGN_LEFT);
@@ -457,7 +473,8 @@ const struct obs_source_info scene_info =
 obs_scene_t *obs_scene_create(const char *name)
 {
 	struct obs_source *source =
-		obs_source_create(OBS_SOURCE_TYPE_INPUT, "scene", name, NULL);
+		obs_source_create(OBS_SOURCE_TYPE_INPUT, "scene", name, NULL,
+				NULL);
 	return source->context.data;
 }
 
@@ -538,6 +555,82 @@ void obs_scene_enum_items(obs_scene_t *scene,
 	pthread_mutex_unlock(&scene->mutex);
 }
 
+static obs_sceneitem_t *sceneitem_get_ref(obs_sceneitem_t *si)
+{
+	long owners = si->ref;
+	while (owners > 0) {
+		if (os_atomic_compare_swap_long(&si->ref, owners, owners + 1))
+			return si;
+
+		owners = si->ref;
+	}
+	return NULL;
+}
+
+static bool hotkey_show_sceneitem(void *data, obs_hotkey_pair_id id,
+		obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+
+	obs_sceneitem_t *si = sceneitem_get_ref(data);
+	if (pressed && si && !si->visible) {
+		obs_sceneitem_set_visible(si, true);
+		obs_sceneitem_release(si);
+		return true;
+	}
+
+	obs_sceneitem_release(si);
+	return false;
+}
+
+static bool hotkey_hide_sceneitem(void *data, obs_hotkey_pair_id id,
+		obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+
+	obs_sceneitem_t *si = sceneitem_get_ref(data);
+	if (pressed && si && si->visible) {
+		obs_sceneitem_set_visible(si, false);
+		obs_sceneitem_release(si);
+		return true;
+	}
+
+	obs_sceneitem_release(si);
+	return false;
+}
+
+static void init_hotkeys(obs_scene_t *scene, obs_sceneitem_t *item,
+		const char *name)
+{
+	struct dstr show = {0};
+	struct dstr hide = {0};
+	struct dstr show_desc = {0};
+	struct dstr hide_desc = {0};
+
+	dstr_copy(&show, "libobs.show_scene_item.%1");
+	dstr_replace(&show, "%1", name);
+	dstr_copy(&hide, "libobs.hide_scene_item.%1");
+	dstr_replace(&hide, "%1", name);
+
+	dstr_copy(&show_desc, obs->hotkeys.sceneitem_show);
+	dstr_replace(&show_desc, "%1", name);
+	dstr_copy(&hide_desc, obs->hotkeys.sceneitem_hide);
+	dstr_replace(&hide_desc, "%1", name);
+
+	item->toggle_visibility = obs_hotkey_pair_register_source(scene->source,
+			show.array, show_desc.array,
+			hide.array, hide_desc.array,
+			hotkey_show_sceneitem, hotkey_hide_sceneitem,
+			item, item);
+
+	dstr_free(&show);
+	dstr_free(&hide);
+	dstr_free(&show_desc);
+	dstr_free(&hide_desc);
+}
+
 obs_sceneitem_t *obs_scene_add(obs_scene_t *scene, obs_source_t *source)
 {
 	struct obs_scene_item *last;
@@ -585,6 +678,8 @@ obs_sceneitem_t *obs_scene_add(obs_scene_t *scene, obs_source_t *source)
 
 	pthread_mutex_unlock(&scene->mutex);
 
+	init_hotkeys(scene, item, obs_source_get_name(source));
+
 	calldata_set_ptr(&params, "scene", scene);
 	calldata_set_ptr(&params, "item", item);
 	signal_handler_signal(scene->source->context.signals, "item_add",
@@ -597,6 +692,7 @@ obs_sceneitem_t *obs_scene_add(obs_scene_t *scene, obs_source_t *source)
 static void obs_sceneitem_destroy(obs_sceneitem_t *item)
 {
 	if (item) {
+		obs_hotkey_pair_unregister(item->toggle_visibility);
 		if (item->source)
 			obs_source_release(item->source);
 		bfree(item);
@@ -715,21 +811,14 @@ void obs_sceneitem_set_alignment(obs_sceneitem_t *item, uint32_t alignment)
 	}
 }
 
-static inline void signal_move_dir(struct obs_scene_item *item,
-		enum obs_order_movement movement)
+static inline void signal_reorder(struct obs_scene_item *item)
 {
 	const char *command = NULL;
 	struct calldata params = {0};
 
-	switch (movement) {
-	case OBS_ORDER_MOVE_UP:     command = "item_move_up";     break;
-	case OBS_ORDER_MOVE_DOWN:   command = "item_move_down";   break;
-	case OBS_ORDER_MOVE_TOP:    command = "item_move_top";    break;
-	case OBS_ORDER_MOVE_BOTTOM: command = "item_move_bottom"; break;
-	}
+	command = "reorder";
 
 	calldata_set_ptr(&params, "scene", item->parent);
-	calldata_set_ptr(&params, "item",  item);
 
 	signal_handler_signal(item->parent->source->context.signals,
 			command, &params);
@@ -774,7 +863,39 @@ void obs_sceneitem_set_order(obs_sceneitem_t *item,
 		attach_sceneitem(scene, item, NULL);
 	}
 
-	signal_move_dir(item, movement);
+	signal_reorder(item);
+
+	pthread_mutex_unlock(&scene->mutex);
+	obs_scene_release(scene);
+}
+
+void obs_sceneitem_set_order_position(obs_sceneitem_t *item,
+		int position)
+{
+	if (!item) return;
+
+	struct obs_scene *scene = item->parent;
+	struct obs_scene_item *next;
+
+	obs_scene_addref(scene);
+	pthread_mutex_lock(&scene->mutex);
+
+	detach_sceneitem(item);
+	next = scene->first_item;
+
+	if (position == 0) {
+		attach_sceneitem(scene, item, NULL);
+	} else {
+		for (int i = position; i > 1; --i) {
+			if (next->next == NULL)
+				break;
+			next = next->next;
+		}
+
+		attach_sceneitem(scene, item, next);
+	}
+
+	signal_reorder(item);
 
 	pthread_mutex_unlock(&scene->mutex);
 	obs_scene_release(scene);
@@ -885,4 +1006,31 @@ void obs_sceneitem_get_box_transform(const obs_sceneitem_t *item,
 {
 	if (item)
 		matrix4_copy(transform, &item->box_transform);
+}
+
+bool obs_sceneitem_visible(const obs_sceneitem_t *item)
+{
+	return item ? item->visible : false;
+}
+
+void obs_sceneitem_set_visible(obs_sceneitem_t *item, bool visible)
+{
+	struct calldata cd = {0};
+
+	if (!item)
+		return;
+
+	item->visible = visible;
+
+	if (!item->parent)
+		return;
+
+	calldata_set_ptr(&cd, "scene", item->parent);
+	calldata_set_ptr(&cd, "item", item);
+	calldata_set_bool(&cd, "visible", visible);
+
+	signal_handler_signal(item->parent->source->context.signals,
+			"item_visible", &cd);
+
+	calldata_free(&cd);
 }

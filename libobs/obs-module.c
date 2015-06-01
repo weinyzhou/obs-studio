@@ -253,6 +253,9 @@ static void process_found_module(struct obs_module_path *omp,
 	char                   *parsed_data_dir;
 	bool                   bin_found = true;
 
+	if (strcmp(path, ".") == 0 || strcmp(path, "..") == 0)
+		return;
+
 	file = strrchr(path, '/');
 	file = file ? (file + 1) : path;
 
@@ -469,6 +472,12 @@ void obs_register_source_s(const struct obs_source_info *info, size_t size)
 	}
 
 	memcpy(&data, info, size);
+
+	/* mark audio-only filters as an async filter categorically */
+	if (data.type == OBS_SOURCE_TYPE_FILTER) {
+		if ((data.output_flags & OBS_SOURCE_VIDEO) == 0)
+			data.output_flags |= OBS_SOURCE_ASYNC;
+	}
 
 	darray_push_back(sizeof(struct obs_source_info), array, &data);
 }

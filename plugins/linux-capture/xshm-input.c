@@ -431,19 +431,25 @@ static void xshm_video_render(void *vptr, gs_effect_t *effect)
 {
 	XSHM_DATA(vptr);
 
+	effect = obs_get_opaque_effect();
+
 	if (!data->texture)
 		return;
 
 	gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
 	gs_effect_set_texture(image, data->texture);
 
-	gs_enable_blending(false);
-	gs_draw_sprite(data->texture, 0, 0, 0);
+	while (gs_effect_loop(effect, "Draw")) {
+		gs_draw_sprite(data->texture, 0, 0, 0);
+	}
 
-	if (data->show_cursor)
-		xcb_xcursor_render(data->cursor);
+	if (data->show_cursor) {
+		effect = obs_get_default_effect();
 
-	gs_reset_blend_state();
+		while (gs_effect_loop(effect, "Draw")) {
+			xcb_xcursor_render(data->cursor);
+		}
+	}
 }
 
 /**
@@ -467,7 +473,8 @@ static uint32_t xshm_getheight(void *vptr)
 struct obs_source_info xshm_input = {
 	.id             = "xshm_input",
 	.type           = OBS_SOURCE_TYPE_INPUT,
-	.output_flags   = OBS_SOURCE_VIDEO,
+	.output_flags   = OBS_SOURCE_VIDEO |
+	                  OBS_SOURCE_CUSTOM_DRAW,
 	.get_name       = xshm_getname,
 	.create         = xshm_create,
 	.destroy        = xshm_destroy,

@@ -34,7 +34,7 @@ const char *obs_service_get_display_name(const char *id)
 }
 
 obs_service_t *obs_service_create(const char *id, const char *name,
-		obs_data_t *settings)
+		obs_data_t *settings, obs_data_t *hotkey_data)
 {
 	const struct obs_service_info *info = find_service(id);
 	struct obs_service *service;
@@ -46,7 +46,8 @@ obs_service_t *obs_service_create(const char *id, const char *name,
 
 	service = bzalloc(sizeof(struct obs_service));
 
-	if (!obs_context_data_init(&service->context, settings, name)) {
+	if (!obs_context_data_init(&service->context, settings, name,
+				hotkey_data)) {
 		bfree(service);
 		return NULL;
 	}
@@ -59,6 +60,9 @@ obs_service_t *obs_service_create(const char *id, const char *name,
 		obs_service_destroy(service);
 		return NULL;
 	}
+
+	service->control = bzalloc(sizeof(obs_weak_service_t));
+	service->control->service = service;
 
 	obs_context_data_insert(&service->context,
 			&obs->data.services_mutex,
@@ -234,4 +238,91 @@ bool obs_service_initialize(struct obs_service *service,
 	if (service->info.initialize)
 		return service->info.initialize(service->context.data, output);
 	return true;
+}
+
+void obs_service_apply_encoder_settings(obs_service_t *service,
+		obs_data_t *video_encoder_settings,
+		obs_data_t *audio_encoder_settings)
+{
+	if (!service || !service->info.apply_encoder_settings)
+		return;
+
+	if (video_encoder_settings || audio_encoder_settings)
+		service->info.apply_encoder_settings(service->context.data,
+				video_encoder_settings, audio_encoder_settings);
+}
+
+void obs_service_addref(obs_service_t *service)
+{
+	if (!service)
+		return;
+
+	obs_ref_addref(&service->control->ref);
+}
+
+void obs_service_release(obs_service_t *service)
+{
+	if (!service)
+		return;
+
+	obs_weak_service_t *control = service->control;
+	if (obs_ref_release(&control->ref)) {
+		// The order of operations is important here since
+		// get_context_by_name in obs.c relies on weak refs
+		// being alive while the context is listed
+		obs_service_destroy(service);
+		obs_weak_service_release(control);
+	}
+}
+
+void obs_weak_service_addref(obs_weak_service_t *weak)
+{
+	if (!weak)
+		return;
+
+	obs_weak_ref_addref(&weak->ref);
+}
+
+void obs_weak_service_release(obs_weak_service_t *weak)
+{
+	if (!weak)
+		return;
+
+	if (obs_weak_ref_release(&weak->ref))
+		bfree(weak);
+}
+
+obs_service_t *obs_service_get_ref(obs_service_t *service)
+{
+	if (!service)
+		return NULL;
+
+	return obs_weak_service_get_service(service->control);
+}
+
+obs_weak_service_t *obs_service_get_weak_service(obs_service_t *service)
+{
+	if (!service)
+		return NULL;
+
+	obs_weak_service_t *weak = service->control;
+	obs_weak_service_addref(weak);
+	return weak;
+}
+
+obs_service_t *obs_weak_service_get_service(obs_weak_service_t *weak)
+{
+	if (!weak)
+		return NULL;
+
+	if (obs_weak_ref_get_ref(&weak->ref))
+		return weak->service;
+
+	return NULL;
+}
+
+bool obs_weak_service_references_service(obs_weak_service_t *weak,
+		obs_service_t *service)
+{
+	return weak && service && weak->service == service;
 }

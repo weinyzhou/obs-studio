@@ -20,6 +20,7 @@
 #include "window-basic-main.hpp"
 #include "qt-wrappers.hpp"
 #include "display-helpers.hpp"
+#include "properties-view.hpp"
 
 #include <QCloseEvent>
 #include <QScreen>
@@ -38,9 +39,8 @@ OBSBasicProperties::OBSBasicProperties(QWidget *parent, OBSSource source_)
 	  removedSignal          (obs_source_get_signal_handler(source),
 	                          "remove", OBSBasicProperties::SourceRemoved,
 	                          this),
-	  updatePropertiesSignal (obs_source_get_signal_handler(source),
-	                          "update_properties",
-	                          OBSBasicProperties::UpdateProperties,
+	  renamedSignal          (obs_source_get_signal_handler(source),
+	                          "rename", OBSBasicProperties::SourceRenamed,
 	                          this),
 	  oldSettings            (obs_data_create()),
 	  buttonBox              (new QDialogButtonBox(this))
@@ -59,6 +59,9 @@ OBSBasicProperties::OBSBasicProperties(QWidget *parent, OBSSource source_)
 	if (cx > 400 && cy > 400)
 		resize(cx, cy);
 
+	/* The OBSData constructor increments the reference once */
+	obs_data_release(oldSettings);
+
 	OBSData settings = obs_source_get_settings(source);
 	obs_data_apply(oldSettings, settings);
 	obs_data_release(settings);
@@ -75,6 +78,8 @@ OBSBasicProperties::OBSBasicProperties(QWidget *parent, OBSSource source_)
 	view->setMinimumHeight(150);
 	view->show();
 
+	installEventFilter(CreateShortcutFilter());
+
 	connect(view, SIGNAL(PropertiesResized()),
 			this, SLOT(OnPropertiesResized()));
 
@@ -86,6 +91,18 @@ OBSBasicProperties::OBSBasicProperties(QWidget *parent, OBSSource source_)
 
 	const char *name = obs_source_get_name(source);
 	setWindowTitle(QTStr("Basic.PropertiesWindow").arg(QT_UTF8(name)));
+
+	obs_source_inc_showing(source);
+
+	updatePropertiesSignal.Connect(obs_source_get_signal_handler(source),
+			"update_properties",
+			OBSBasicProperties::UpdateProperties,
+			this);
+}
+
+OBSBasicProperties::~OBSBasicProperties()
+{
+	obs_source_dec_showing(source);
 }
 
 void OBSBasicProperties::SourceRemoved(void *data, calldata_t *params)
@@ -94,6 +111,15 @@ void OBSBasicProperties::SourceRemoved(void *data, calldata_t *params)
 			"close");
 
 	UNUSED_PARAMETER(params);
+}
+
+void OBSBasicProperties::SourceRenamed(void *data, calldata_t *params)
+{
+	const char *name = calldata_string(params, "new_name");
+	QString title = QTStr("Basic.PropertiesWindow").arg(QT_UTF8(name));
+
+	QMetaObject::invokeMethod(static_cast<OBSBasicProperties*>(data),
+	                "setWindowTitle", Q_ARG(QString, title));
 }
 
 void OBSBasicProperties::UpdateProperties(void *data, calldata_t *)
@@ -109,6 +135,9 @@ void OBSBasicProperties::on_buttonBox_clicked(QAbstractButton *button)
 	if (val == QDialogButtonBox::AcceptRole) {
 		acceptClicked = true;
 		close();
+
+		if (view->DeferUpdate())
+			view->UpdateSettings();
 	}
 
 	if (val == QDialogButtonBox::RejectRole) {
@@ -116,7 +145,10 @@ void OBSBasicProperties::on_buttonBox_clicked(QAbstractButton *button)
 		obs_data_clear(settings);
 		obs_data_release(settings);
 
-		obs_source_update(source, oldSettings);
+		if (view->DeferUpdate())
+			obs_data_apply(settings, oldSettings);
+		else
+			obs_source_update(source, oldSettings);
 
 		close();
 	}
@@ -182,6 +214,32 @@ void OBSBasicProperties::timerEvent(QTimerEvent *event)
 	}
 }
 
+void OBSBasicProperties::Cleanup()
+{
+	// remove draw callback and release display in case our drawable
+	// surfaces go away before the destructor gets called
+	obs_display_remove_draw_callback(display,
+			OBSBasicProperties::DrawPreview, this);
+	display = nullptr;
+
+	config_set_int(App()->GlobalConfig(), "PropertiesWindow", "cx",
+			width());
+	config_set_int(App()->GlobalConfig(), "PropertiesWindow", "cy",
+			height());
+}
+
+void OBSBasicProperties::reject()
+{
+	if (!acceptClicked && (CheckSettings() != 0)) {
+		if (!ConfirmQuit()) {
+			return;
+		}
+	}
+
+	Cleanup();
+	done(0);
+}
+
 void OBSBasicProperties::closeEvent(QCloseEvent *event)
 {
 	if (!acceptClicked && (CheckSettings() != 0)) {
@@ -195,18 +253,7 @@ void OBSBasicProperties::closeEvent(QCloseEvent *event)
 	if (!event->isAccepted())
 		return;
 
-	obs_data_release(oldSettings);
-
-	// remove draw callback and release display in case our drawable
-	// surfaces go away before the destructor gets called
-	obs_display_remove_draw_callback(display,
-			OBSBasicProperties::DrawPreview, this);
-	display = nullptr;
-
-	config_set_int(App()->GlobalConfig(), "PropertiesWindow", "cx",
-			width());
-	config_set_int(App()->GlobalConfig(), "PropertiesWindow", "cy",
-			height());
+	Cleanup();
 }
 
 void OBSBasicProperties::Init()
@@ -252,6 +299,8 @@ bool OBSBasicProperties::ConfirmQuit()
 
 	switch (button) {
 	case QMessageBox::Save:
+		if (view->DeferUpdate())
+			view->UpdateSettings();
 		// Do nothing because the settings are already updated
 		break;
 	case QMessageBox::Discard:

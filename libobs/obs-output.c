@@ -47,9 +47,10 @@ static const char *output_signals[] = {
 };
 
 static bool init_output_handlers(struct obs_output *output, const char *name,
-		obs_data_t *settings)
+		obs_data_t *settings, obs_data_t *hotkey_data)
 {
-	if (!obs_context_data_init(&output->context, settings, name))
+	if (!obs_context_data_init(&output->context, settings, name,
+				hotkey_data))
 		return false;
 
 	signal_handler_add_array(output->context.signals, output_signals);
@@ -57,7 +58,7 @@ static bool init_output_handlers(struct obs_output *output, const char *name,
 }
 
 obs_output_t *obs_output_create(const char *id, const char *name,
-		obs_data_t *settings)
+		obs_data_t *settings, obs_data_t *hotkey_data)
 {
 	const struct obs_output_info *info = find_output(id);
 	struct obs_output *output;
@@ -73,7 +74,7 @@ obs_output_t *obs_output_create(const char *id, const char *name,
 
 	if (pthread_mutex_init(&output->interleaved_mutex, NULL) != 0)
 		goto fail;
-	if (!init_output_handlers(output, name, settings))
+	if (!init_output_handlers(output, name, settings, hotkey_data))
 		goto fail;
 
 	output->info     = *info;
@@ -94,6 +95,9 @@ obs_output_t *obs_output_create(const char *id, const char *name,
 	output->reconnect_retry_sec = 2;
 	output->reconnect_retry_max = 20;
 	output->valid               = true;
+
+	output->control = bzalloc(sizeof(obs_weak_output_t));
+	output->control->output = output;
 
 	obs_context_data_insert(&output->context,
 			&obs->data.outputs_mutex,
@@ -677,7 +681,19 @@ static size_t get_track_index(const struct obs_output *output,
 	return 0;
 }
 
-static void apply_interleaved_packet_offset(struct obs_output *output,
+static inline void check_received(struct obs_output *output,
+		struct encoder_packet *out)
+{
+	if (out->type == OBS_ENCODER_VIDEO) {
+		if (!output->received_video)
+			output->received_video = true;
+	} else {
+		if (!output->received_audio)
+			output->received_audio = true;
+	}
+}
+
+static inline void apply_interleaved_packet_offset(struct obs_output *output,
 		struct encoder_packet *out)
 {
 	int64_t offset;
@@ -686,17 +702,8 @@ static void apply_interleaved_packet_offset(struct obs_output *output,
 	 * may not currently be at 0 when we get data.  so, we store the
 	 * current dts as offset and subtract that value from the dts/pts
 	 * of the output packet. */
-	if (out->type == OBS_ENCODER_VIDEO) {
-		if (!output->received_video)
-			output->received_video = true;
-
-		offset = output->video_offset;
-	} else {
-		if (!output->received_audio)
-			output->received_audio = true;
-
-		offset = output->audio_offsets[out->track_idx];
-	}
+	offset = (out->type == OBS_ENCODER_VIDEO) ?
+		output->video_offset : output->audio_offsets[out->track_idx];
 
 	out->dts -= offset;
 	out->pts -= offset;
@@ -896,7 +903,12 @@ static void interleave_packets(void *data, struct encoder_packet *packet)
 	was_started = output->received_audio && output->received_video;
 
 	obs_duplicate_encoder_packet(&out, packet);
-	apply_interleaved_packet_offset(output, &out);
+
+	if (was_started)
+		apply_interleaved_packet_offset(output, &out);
+	else
+		check_received(output, packet);
+
 	insert_interleaved_packet(output, &out);
 	set_higher_ts(output, &out);
 
@@ -1015,7 +1027,12 @@ static inline void signal_start(struct obs_output *output)
 
 static inline void signal_reconnect(struct obs_output *output)
 {
-	do_output_signal(output, "reconnect");
+	struct calldata params = {0};
+	calldata_set_int(&params, "timeout_sec",
+			output->reconnect_retry_cur_sec);
+	calldata_set_ptr(&params, "output", output);
+	signal_handler_signal(output->context.signals, "reconnect", &params);
+	calldata_free(&params);
 }
 
 static inline void signal_reconnect_success(struct obs_output *output)
@@ -1078,7 +1095,9 @@ static inline bool pair_encoders(obs_output_t *output, size_t num_mixes)
 {
 	if (num_mixes == 1 &&
 	    !output->audio_encoders[0]->active &&
-	    !output->video_encoder->active) {
+	    !output->video_encoder->active &&
+	    !output->video_encoder->paired_encoder &&
+	    !output->audio_encoders[0]->paired_encoder) {
 
 		output->audio_encoders[0]->wait_for_video = true;
 		output->audio_encoders[0]->paired_encoder =
@@ -1202,7 +1221,7 @@ void obs_output_end_data_capture(obs_output_t *output)
 static void *reconnect_thread(void *param)
 {
 	struct obs_output *output = param;
-	unsigned long ms = output->reconnect_retry_sec * 1000;
+	unsigned long ms = output->reconnect_retry_cur_sec * 1000;
 
 	output->reconnect_thread_active = true;
 
@@ -1220,8 +1239,10 @@ static void output_reconnect(struct obs_output *output)
 {
 	int ret;
 
-	if (!output->reconnecting)
+	if (!output->reconnecting) {
+		output->reconnect_retry_cur_sec = output->reconnect_retry_sec;
 		output->reconnect_retries = 0;
+	}
 
 	if (output->reconnect_retries >= output->reconnect_retry_max) {
 		output->reconnecting = false;
@@ -1232,6 +1253,10 @@ static void output_reconnect(struct obs_output *output)
 	if (!output->reconnecting) {
 		output->reconnecting = true;
 		os_event_reset(output->reconnect_stop_event);
+	}
+
+	if (output->reconnect_retries) {
+		output->reconnect_retry_cur_sec *= 2;
 	}
 
 	output->reconnect_retries++;
@@ -1262,4 +1287,79 @@ void obs_output_signal_stop(obs_output_t *output, int code)
 		output_reconnect(output);
 	else
 		signal_stop(output, code);
+}
+
+void obs_output_addref(obs_output_t *output)
+{
+	if (!output)
+		return;
+
+	obs_ref_addref(&output->control->ref);
+}
+
+void obs_output_release(obs_output_t *output)
+{
+	if (!output)
+		return;
+
+	obs_weak_output_t *control = output->control;
+	if (obs_ref_release(&control->ref)) {
+		// The order of operations is important here since
+		// get_context_by_name in obs.c relies on weak refs
+		// being alive while the context is listed
+		obs_output_destroy(output);
+		obs_weak_output_release(control);
+	}
+}
+
+void obs_weak_output_addref(obs_weak_output_t *weak)
+{
+	if (!weak)
+		return;
+
+	obs_weak_ref_addref(&weak->ref);
+}
+
+void obs_weak_output_release(obs_weak_output_t *weak)
+{
+	if (!weak)
+		return;
+
+	if (obs_weak_ref_release(&weak->ref))
+		bfree(weak);
+}
+
+obs_output_t *obs_output_get_ref(obs_output_t *output)
+{
+	if (!output)
+		return NULL;
+
+	return obs_weak_output_get_output(output->control);
+}
+
+obs_weak_output_t *obs_output_get_weak_output(obs_output_t *output)
+{
+	if (!output)
+		return NULL;
+
+	obs_weak_output_t *weak = output->control;
+	obs_weak_output_addref(weak);
+	return weak;
+}
+
+obs_output_t *obs_weak_output_get_output(obs_weak_output_t *weak)
+{
+	if (!weak)
+		return NULL;
+
+	if (obs_weak_ref_get_ref(&weak->ref))
+		return weak->output;
+
+	return NULL;
+}
+
+bool obs_weak_output_references_output(obs_weak_output_t *weak,
+		obs_output_t *output)
+{
+	return weak && output && weak->output == output;
 }

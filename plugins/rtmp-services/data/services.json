@@ -16,7 +16,7 @@
             },
             {
                 "name": "Asia: Singapore",
-                "url": "rtmp://live-sin-backup.twitch.tv/app"
+                "url": "rtmp://live-sin.twitch.tv/app"
             },
             {
                 "name": "Asia: Taipei, Taiwan",
@@ -115,12 +115,16 @@
                 "url": "rtmp://live.fra.hitbox.tv/push"
             },
             {
-                "name": "EU-East: Vienna, Austria",
-                "url": "rtmp://live.vie.hitbox.tv/push"
+                "name": "EU-West: Paris, France",
+                "url": "rtmp://live.cdg.hitbox.tv/push"
             },
             {
                 "name": "EU-North: London, United Kingdom",
                 "url": "rtmp://live.lhr.hitbox.tv/push"
+            },
+            {
+                "name": "EU-South: Milan, Italia",
+                "url": "rtmp://live.mxp.hitbox.tv/push"
             },
             {
                 "name": "EU-Central: Nurnberg, Germany",
@@ -135,8 +139,16 @@
                 "url": "rtmp://live.vgn.hitbox.tv/push"
             },
             {
+                "name": "US-East: New York",
+                "url": "rtmp://live.jfk.hitbox.tv/push"
+            },
+            {
                 "name": "US-Central: Denver",
                 "url": "rtmp://live.den.hitbox.tv/push"
+            },
+            {
+                "name": "US-West: San Francisco",
+                "url": "rtmp://live.sfo.hitbox.tv/push"
             },
             {
                 "name": "US-West: Los Angeles",
@@ -179,16 +191,20 @@
                 "url": "rtmp://live.vaughnsoft.net:443/live"
             },
             {
-                "name": "US: Virginia, USA",
-                "url": "rtmp://live-iad.vaughnsoft.net:443/live"
+                "name": "US: San Jose, CA",
+                "url": "rtmp://live-sjc.vaughnsoft.net:443/live"
             },
             {
-                "name": "US: Chicago, IL",
-                "url": "rtmp://live-ord.vaughnsoft.net:443/live"
+                "name": "US: New York, NY",
+                "url": "rtmp://live-nyc.vaughnsoft.net:443/live"
             },
             {
-                "name": "EU: Frankfurt, Germany",
-                "url": "rtmp://live-de.vaughnsoft.net:443/live"
+                "name": "US: New York 2, NY",
+                "url": "rtmp://live-nyc2.vaughnsoft.net:443/live"
+            },
+            {
+                "name": "EU: Amsterdam, NL",
+                "url": "rtmp://live-nl.vaughnsoft.net:443/live"
             }
         ]
     },
@@ -223,16 +239,8 @@
         "name": "GoodGame.ru",
         "servers": [
             {
-                "name": "Moscow M9",
-                "url": "rtmp://stream.goodgame.ru:1940/live"
-            },
-            {
-                "name": "Moscow M10",
-                "url": "rtmp://stream2.goodgame.ru:1940/live"
-            },
-            {
-                "name": "Saint-Petersburg",
-                "url": "rtmp://spb1.goodgame.ru:1940/live"
+                "name": "Моscow",
+                "url": "rtmp://msk.goodgame.ru:1940/live"
             }
         ]
     },

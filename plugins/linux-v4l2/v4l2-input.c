@@ -41,10 +41,25 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "v4l2-udev.h"
 #endif
 
+/* The new dv timing api was introduced in Linux 3.4
+ * Currently we simply disable dv timings when this is not defined */
+#if !defined(VIDIOC_ENUM_DV_TIMINGS) || !defined(V4L2_IN_CAP_DV_TIMINGS)
+#define V4L2_IN_CAP_DV_TIMINGS 0
+#endif
+
 #define V4L2_DATA(voidptr) struct v4l2_data *data = voidptr;
 
 #define timeval2ns(tv) \
 	(((uint64_t) tv.tv_sec * 1000000000) + ((uint64_t) tv.tv_usec * 1000))
+
+#define V4L2_FOURCC_STR(code) \
+	(char[5]) { \
+		(code >> 24) & 0xFF, \
+		(code >> 16) & 0xFF, \
+		(code >>  8) & 0xFF, \
+		 code        & 0xFF, \
+		                  0  \
+	}
 
 #define blog(level, msg, ...) blog(level, "v4l2-input: " msg, ##__VA_ARGS__)
 
@@ -56,15 +71,15 @@ struct v4l2_data {
 	char *device_id;
 	int input;
 	int pixfmt;
+	int standard;
+	int dv_timing;
 	int resolution;
 	int framerate;
-	bool sys_timing;
 
 	/* internal data */
 	obs_source_t *source;
 	pthread_t thread;
 	os_event_t *event;
-	void *udev;
 
 	int_fast32_t dev;
 	int width;
@@ -177,12 +192,9 @@ static void *v4l2_thread(void *vptr)
 			break;
 		}
 
-		out.timestamp = data->sys_timing ?
-			os_gettime_ns() : timeval2ns(buf.timestamp);
-
+		out.timestamp = timeval2ns(buf.timestamp);
 		if (!frames)
 			first_ts = out.timestamp;
-
 		out.timestamp -= first_ts;
 
 		start = (uint8_t *) data->buffers.info[buf.index].start;
@@ -214,9 +226,11 @@ static void v4l2_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, "input", -1);
 	obs_data_set_default_int(settings, "pixelformat", -1);
+	obs_data_set_default_int(settings, "standard", -1);
+	obs_data_set_default_int(settings, "dv_timing", -1);
 	obs_data_set_default_int(settings, "resolution", -1);
 	obs_data_set_default_int(settings, "framerate", -1);
-	obs_data_set_default_bool(settings, "system_timing", false);
+	obs_data_set_default_bool(settings, "buffering", true);
 }
 
 /**
@@ -255,7 +269,11 @@ static void v4l2_device_list(obs_property_t *prop, obs_data_t *settings)
 	size_t cur_device_index;
 	const char *cur_device_name;
 
+#ifdef __FreeBSD__
+	dirp = opendir("/dev");
+#else
 	dirp = opendir("/sys/class/video4linux");
+#endif
 	if (!dirp)
 		return;
 
@@ -270,6 +288,11 @@ static void v4l2_device_list(obs_property_t *prop, obs_data_t *settings)
 		int fd;
 		uint32_t caps;
 		struct v4l2_capability video_cap;
+
+#ifdef __FreeBSD__
+		if (strstr(dp->d_name, "video") == NULL)
+			continue;
+#endif
 
 		if (dp->d_type == DT_DIR)
 			continue;
@@ -289,9 +312,14 @@ static void v4l2_device_list(obs_property_t *prop, obs_data_t *settings)
 			continue;
 		}
 
+#ifndef V4L2_CAP_DEVICE_CAPS
+		caps = video_cap.capabilities;
+#else
+		/* ... since Linux 3.3 */
 		caps = (video_cap.capabilities & V4L2_CAP_DEVICE_CAPS)
 			? video_cap.device_caps
 			: video_cap.capabilities;
+#endif
 
 		if (!(caps & V4L2_CAP_VIDEO_CAPTURE)) {
 			blog(LOG_INFO, "%s seems to not support video capture",
@@ -333,15 +361,10 @@ static void v4l2_input_list(int_fast32_t dev, obs_property_t *prop)
 
 	obs_property_list_clear(prop);
 
-	obs_property_list_add_int(prop, obs_module_text("LeaveUnchanged"), -1);
-
 	while (v4l2_ioctl(dev, VIDIOC_ENUMINPUT, &in) == 0) {
-		if (in.type & V4L2_INPUT_TYPE_CAMERA) {
-			obs_property_list_add_int(prop, (char *) in.name,
-					in.index);
-			blog(LOG_INFO, "Found input '%s' (Index %d)", in.name,
-					in.index);
-		}
+		obs_property_list_add_int(prop, (char *) in.name, in.index);
+		blog(LOG_INFO, "Found input '%s' (Index %d)", in.name,
+				in.index);
 		in.index++;
 	}
 }
@@ -358,8 +381,6 @@ static void v4l2_format_list(int dev, obs_property_t *prop)
 	dstr_init(&buffer);
 
 	obs_property_list_clear(prop);
-
-	obs_property_list_add_int(prop, obs_module_text("LeaveUnchanged"), -1);
 
 	while (v4l2_ioctl(dev, VIDIOC_ENUM_FMT, &fmt) == 0) {
 		dstr_copy(&buffer, (char *) fmt.description);
@@ -380,6 +401,61 @@ static void v4l2_format_list(int dev, obs_property_t *prop)
 	}
 
 	dstr_free(&buffer);
+}
+
+/*
+ * List video standards for the device
+ */
+static void v4l2_standard_list(int dev, obs_property_t *prop)
+{
+	struct v4l2_standard std;
+	std.index = 0;
+
+	obs_property_list_clear(prop);
+
+	obs_property_list_add_int(prop, obs_module_text("LeaveUnchanged"), -1);
+
+	while (v4l2_ioctl(dev, VIDIOC_ENUMSTD, &std) == 0) {
+		obs_property_list_add_int(prop, (char *) std.name, std.id);
+		std.index++;
+	}
+}
+
+/*
+ * List dv timings for the device
+ */
+static void v4l2_dv_timing_list(int dev, obs_property_t *prop)
+{
+	struct v4l2_dv_timings dvt;
+	struct dstr buf;
+	int index = 0;
+	dstr_init(&buf);
+
+	obs_property_list_clear(prop);
+
+	obs_property_list_add_int(prop, obs_module_text("LeaveUnchanged"), -1);
+
+	while (v4l2_enum_dv_timing(dev, &dvt, index) == 0) {
+		/* i do not pretend to understand, this is from qv4l2 ... */
+		double h    = (double) dvt.bt.height + dvt.bt.vfrontporch +
+				dvt.bt.vsync + dvt.bt.vbackporch +
+				dvt.bt.il_vfrontporch + dvt.bt.il_vsync +
+				dvt.bt.il_vbackporch;
+		double w    = (double) dvt.bt.width + dvt.bt.hfrontporch +
+				dvt.bt.hsync + dvt.bt.hbackporch;
+		double i    = (dvt.bt.interlaced) ? 2.0f : 1.0f;
+		double rate = (double) dvt.bt.pixelclock / (w * (h / i));
+
+		dstr_printf(&buf, "%ux%u%c %.2f",
+				dvt.bt.width, dvt.bt.height,
+				(dvt.bt.interlaced) ? 'i' : 'p', rate);
+
+		obs_property_list_add_int(prop, buf.array, index);
+
+		index++;
+	}
+
+	dstr_free(&buf);
 }
 
 /*
@@ -535,12 +611,41 @@ static bool format_selected(obs_properties_t *props, obs_property_t *p,
 	if (dev == -1)
 		return false;
 
-	obs_property_t *prop = obs_properties_get(props, "resolution");
-	v4l2_resolution_list(dev, obs_data_get_int(settings, "pixelformat"),
-			prop);
+	int input     = (int) obs_data_get_int(settings, "input");
+	uint32_t caps = 0;
+	if (v4l2_get_input_caps(dev, input, &caps) < 0)
+		return false;
+	caps &= V4L2_IN_CAP_STD | V4L2_IN_CAP_DV_TIMINGS;
+
+	obs_property_t *resolution = obs_properties_get(props, "resolution");
+	obs_property_t *framerate  = obs_properties_get(props, "framerate");
+	obs_property_t *standard   = obs_properties_get(props, "standard");
+	obs_property_t *dv_timing  = obs_properties_get(props, "dv_timing");
+
+	obs_property_set_visible(resolution, (!caps) ? true : false);
+	obs_property_set_visible(framerate,  (!caps) ? true : false);
+	obs_property_set_visible(standard,
+			(caps & V4L2_IN_CAP_STD) ? true : false);
+	obs_property_set_visible(dv_timing,
+			(caps & V4L2_IN_CAP_DV_TIMINGS) ? true : false);
+
+	if (!caps) {
+		v4l2_resolution_list(dev, obs_data_get_int(
+				settings, "pixelformat"), resolution);
+	}
+	if (caps & V4L2_IN_CAP_STD)
+		v4l2_standard_list(dev, standard);
+	if (caps & V4L2_IN_CAP_DV_TIMINGS)
+		v4l2_dv_timing_list(dev, dv_timing);
+
 	v4l2_close(dev);
 
-	obs_property_modified(prop, settings);
+	if (!caps)
+		obs_property_modified(resolution, settings);
+	if (caps & V4L2_IN_CAP_STD)
+		obs_property_modified(standard, settings);
+	if (caps & V4L2_IN_CAP_DV_TIMINGS)
+		obs_property_modified(dv_timing, settings);
 
 	return true;
 }
@@ -577,11 +682,14 @@ static bool resolution_selected(obs_properties_t *props, obs_property_t *p,
  * If everything went fine we can start capturing again when the device is
  * reconnected
  */
-static void device_added(const char *dev, void *vptr)
+static void device_added(void *vptr, calldata_t *calldata)
 {
 	V4L2_DATA(vptr);
 
 	obs_source_update_properties(data->source);
+
+	const char *dev;
+	calldata_get_string(calldata, "device", &dev);
 
 	if (strcmp(data->device_id, dev))
 		return;
@@ -595,11 +703,14 @@ static void device_added(const char *dev, void *vptr)
  *
  * We stop recording here so we don't block the device node
  */
-static void device_removed(const char *dev, void *vptr)
+static void device_removed(void *vptr, calldata_t *calldata)
 {
 	V4L2_DATA(vptr);
 
 	obs_source_update_properties(data->source);
+
+	const char *dev;
+	calldata_get_string(calldata, "device", &dev);
 
 	if (strcmp(data->device_id, dev))
 		return;
@@ -629,6 +740,16 @@ static obs_properties_t *v4l2_properties(void *vptr)
 			"pixelformat", obs_module_text("VideoFormat"),
 			OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 
+	obs_property_t *standard_list = obs_properties_add_list(props,
+			"standard", obs_module_text("VideoStandard"),
+			OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_set_visible(standard_list, false);
+
+	obs_property_t *dv_timing_list = obs_properties_add_list(props,
+			"dv_timing", obs_module_text("DVTiming"),
+			OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_set_visible(dv_timing_list, false);
+
 	obs_property_t *resolution_list = obs_properties_add_list(props,
 			"resolution", obs_module_text("Resolution"),
 			OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -638,7 +759,7 @@ static obs_properties_t *v4l2_properties(void *vptr)
 			OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 
 	obs_properties_add_bool(props,
-			"system_timing", obs_module_text("UseSystemTiming"));
+			"buffering", obs_module_text("UseBuffering"));
 
 	obs_data_t *settings = obs_source_get_settings(data->source);
 	v4l2_device_list(device_list, settings);
@@ -683,7 +804,12 @@ static void v4l2_destroy(void *vptr)
 		bfree(data->device_id);
 
 #if HAVE_UDEV
-	v4l2_unref_udev(data->udev);
+	signal_handler_t *sh = v4l2_get_udev_signalhandler();
+
+	signal_handler_disconnect(sh, "device_added", device_added, data);
+	signal_handler_disconnect(sh, "device_removed", device_removed, data);
+
+	v4l2_unref_udev();
 #endif
 
 	bfree(data);
@@ -701,6 +827,7 @@ static void v4l2_destroy(void *vptr)
  */
 static void v4l2_init(struct v4l2_data *data)
 {
+	uint32_t input_caps;
 	int fps_num, fps_denom;
 
 	blog(LOG_INFO, "Start capture from %s", data->device_id);
@@ -716,6 +843,29 @@ static void v4l2_init(struct v4l2_data *data)
 		goto fail;
 	}
 	blog(LOG_INFO, "Input: %d", data->input);
+	if (v4l2_get_input_caps(data->dev, -1, &input_caps) < 0) {
+		blog(LOG_ERROR, "Unable to get input capabilities");
+		goto fail;
+	}
+
+	/* set video standard if supported */
+	if (input_caps & V4L2_IN_CAP_STD) {
+		if (v4l2_set_standard(data->dev, &data->standard) < 0) {
+			blog(LOG_ERROR, "Unable to set video standard");
+			goto fail;
+		}
+		data->resolution = -1;
+		data->framerate  = -1;
+	}
+	/* set dv timing if supported */
+	if (input_caps & V4L2_IN_CAP_DV_TIMINGS) {
+		if (v4l2_set_dv_timing(data->dev, &data->dv_timing) < 0) {
+			blog(LOG_ERROR, "Unable to set dv timing");
+			goto fail;
+		}
+		data->resolution = -1;
+		data->framerate  = -1;
+	}
 
 	/* set pixel format and resolution */
 	if (v4l2_set_format(data->dev, &data->resolution, &data->pixfmt,
@@ -729,7 +879,7 @@ static void v4l2_init(struct v4l2_data *data)
 	}
 	v4l2_unpack_tuple(&data->width, &data->height, data->resolution);
 	blog(LOG_INFO, "Resolution: %dx%d", data->width, data->height);
-	blog(LOG_INFO, "Pixelformat: %d", data->pixfmt);
+	blog(LOG_INFO, "Pixelformat: %s", V4L2_FOURCC_STR(data->pixfmt));
 	blog(LOG_INFO, "Linesize: %d Bytes", data->linesize);
 
 	/* set framerate */
@@ -757,6 +907,17 @@ fail:
 	v4l2_terminate(data);
 }
 
+/** Update source flags depending on the settings */
+static void v4l2_update_source_flags(struct v4l2_data *data,
+		obs_data_t *settings)
+{
+	uint32_t flags = obs_source_get_flags(data->source);
+	flags = (obs_data_get_bool(settings, "buffering"))
+			? flags & ~OBS_SOURCE_FLAG_UNBUFFERED
+			: flags | OBS_SOURCE_FLAG_UNBUFFERED;
+	obs_source_set_flags(data->source, flags);
+}
+
 /**
  * Update the settings for the v4l2 source
  *
@@ -777,9 +938,12 @@ static void v4l2_update(void *vptr, obs_data_t *settings)
 	data->device_id  = bstrdup(obs_data_get_string(settings, "device_id"));
 	data->input      = obs_data_get_int(settings, "input");
 	data->pixfmt     = obs_data_get_int(settings, "pixelformat");
+	data->standard   = obs_data_get_int(settings, "standard");
+	data->dv_timing  = obs_data_get_int(settings, "dv_timing");
 	data->resolution = obs_data_get_int(settings, "resolution");
 	data->framerate  = obs_data_get_int(settings, "framerate");
-	data->sys_timing = obs_data_get_bool(settings, "system_timing");
+
+	v4l2_update_source_flags(data, settings);
 
 	v4l2_init(data);
 }
@@ -790,12 +954,22 @@ static void *v4l2_create(obs_data_t *settings, obs_source_t *source)
 	data->dev = -1;
 	data->source = source;
 
+	/* Bitch about build problems ... */
+#ifndef V4L2_CAP_DEVICE_CAPS
+	blog(LOG_WARNING, "Plugin built without device caps support!");
+#endif
+#if !defined(VIDIOC_ENUM_DV_TIMINGS) || !defined(V4L2_IN_CAP_DV_TIMINGS)
+	blog(LOG_WARNING, "Plugin built without dv-timing support!");
+#endif
+
 	v4l2_update(data, settings);
 
 #if HAVE_UDEV
-	data->udev = v4l2_init_udev();
-	v4l2_set_device_added_callback(data->udev, &device_added, data);
-	v4l2_set_device_removed_callback(data->udev, &device_removed, data);
+	v4l2_init_udev();
+	signal_handler_t *sh = v4l2_get_udev_signalhandler();
+
+	signal_handler_connect(sh, "device_added", &device_added, data);
+	signal_handler_connect(sh, "device_removed", &device_removed, data);
 #endif
 
 	return data;

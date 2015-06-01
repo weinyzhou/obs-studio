@@ -133,7 +133,6 @@ static inline uint8_t *cursor_capture_icon_bitmap(ICONINFO *ii,
 
 static inline bool cursor_capture_icon(struct cursor_data *data, HICON icon)
 {
-	bool success = false;
 	uint8_t *bitmap;
 	uint32_t height;
 	uint32_t width;
@@ -152,7 +151,7 @@ static inline bool cursor_capture_icon(struct cursor_data *data, HICON icon)
 	bitmap = cursor_capture_icon_bitmap(&ii, &width, &height);
 	if (bitmap) {
 		data->texture = gs_texture_create(width, height, GS_BGRA,
-				1, &bitmap, 0);
+				1, (const uint8_t**)&bitmap, 0);
 		bfree(bitmap);
 
 		data->x_hotspot = ii.xHotspot;
@@ -202,10 +201,17 @@ void cursor_draw(struct cursor_data *data, long x_offset, long y_offset,
 		return;
 
 	if (data->visible && !!data->texture) {
+		gs_blend_state_push();
+		gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+		gs_enable_color(true, true, true, false);
+
 		gs_matrix_push();
 		gs_matrix_scale3f(x_scale, y_scale, 1.0f);
 		obs_source_draw(data->texture, x_draw, y_draw, 0, 0, false);
 		gs_matrix_pop();
+
+		gs_enable_color(true, true, true, true);
+		gs_blend_state_pop();
 	}
 }
 

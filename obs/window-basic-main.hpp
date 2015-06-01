@@ -17,7 +17,6 @@
 
 #pragma once
 
-#include <QNetworkAccessManager>
 #include <QBuffer>
 #include <QAction>
 #include <obs.hpp>
@@ -29,6 +28,7 @@
 #include "window-basic-properties.hpp"
 #include "window-basic-transform.hpp"
 #include "window-basic-adv-audio.hpp"
+#include "window-basic-filters.hpp"
 
 #include <util/platform.h>
 #include <util/util.hpp>
@@ -54,6 +54,13 @@ class OBSBasic : public OBSMainWindow {
 
 	friend class OBSBasicPreview;
 
+	enum class MoveDir {
+		Up,
+		Down,
+		Left,
+		Right
+	};
+
 private:
 	std::unordered_map<obs_source_t*, int> sourceSceneRefs;
 
@@ -61,17 +68,21 @@ private:
 
 	bool loaded = false;
 
+	QPointer<QTimer> saveTimer;
+
+	QPointer<QThread> updateCheckThread;
+	QPointer<QThread> logUploadThread;
+
 	QPointer<OBSBasicInteraction> interaction;
 	QPointer<OBSBasicProperties> properties;
 	QPointer<OBSBasicTransform> transformWindow;
 	QPointer<OBSBasicAdvAudio> advAudioWindow;
-
-	QNetworkAccessManager networkManager;
+	QPointer<OBSBasicFilters> filters;
 
 	QPointer<QTimer>    cpuUsageTimer;
 	os_cpu_usage_info_t *cpuUsageInfo = nullptr;
 
-	obs_service_t *service = nullptr;
+	OBSService service;
 	std::unique_ptr<BasicOutputHandler> outputHandler;
 
 	gs_vertbuffer_t *box = nullptr;
@@ -86,6 +97,8 @@ private:
 
 	ConfigFile    basicConfig;
 
+	QPointer<QWidget> projectors[10];
+
 	void          DrawBackdrop(float cx, float cy);
 
 	void          SetupEncoders();
@@ -98,6 +111,9 @@ private:
 
 	void          Save(const char *file);
 	void          Load(const char *file);
+
+	void          InitHotkeys();
+	void          CreateHotkeys();
 
 	bool          InitService();
 
@@ -131,10 +147,22 @@ private:
 
 	void CreateInteractionWindow(obs_source_t *source);
 	void CreatePropertiesWindow(obs_source_t *source);
+	void CreateFiltersWindow(obs_source_t *source);
+
+	void Nudge(int dist, MoveDir dir);
+	void OpenProjector(obs_source_t *source, int monitor);
+
+	obs_hotkey_pair_id streamingHotkeys, recordingHotkeys;
 
 public slots:
+	void StartStreaming();
+	void StopStreaming();
+
 	void StreamingStart();
 	void StreamingStop(int errorcode);
+
+	void StartRecording();
+	void StopRecording();
 
 	void RecordingStart();
 	void RecordingStop();
@@ -158,8 +186,13 @@ private slots:
 	void RemoveSelectedScene();
 	void RemoveSelectedSceneItem();
 
+	void ReorderSources(OBSScene scene);
+
+	void ProcessHotkey(obs_hotkey_id id, bool pressed);
+
 private:
 	/* OBS Callbacks */
+	static void SceneReordered(void *data, calldata_t *params);
 	static void SceneItemAdded(void *data, calldata_t *params);
 	static void SceneItemRemoved(void *data, calldata_t *params);
 	static void SceneItemSelected(void *data, calldata_t *params);
@@ -172,16 +205,14 @@ private:
 	static void ChannelChanged(void *data, calldata_t *params);
 	static void RenderMain(void *data, uint32_t cx, uint32_t cy);
 
-	static void SceneItemMoveUp(void *data, calldata_t *params);
-	static void SceneItemMoveDown(void *data, calldata_t *params);
-	static void SceneItemMoveTop(void *data, calldata_t *params);
-	static void SceneItemMoveBottom(void *data, calldata_t *params);
-
 	void ResizePreview(uint32_t cx, uint32_t cy);
 
 	void AddSource(const char *id);
 	QMenu *CreateAddSourcePopupMenu();
 	void AddSourcePopupMenu(const QPoint &pos);
+	void copyActionsDynamicProperties();
+
+	static void HotkeyTriggered(void *data, obs_hotkey_id id, bool pressed);
 
 public:
 	OBSScene      GetCurrentScene();
@@ -219,6 +250,10 @@ public:
 	void SaveService();
 	bool LoadService();
 
+	void ReorderSceneItem(obs_sceneitem_t *item, size_t idx);
+
+	void CreateSourcePopupMenu(QListWidgetItem *item, bool preview);
+
 protected:
 	virtual void closeEvent(QCloseEvent *event) override;
 	virtual void changeEvent(QEvent *event) override;
@@ -234,9 +269,11 @@ private slots:
 	void on_action_Settings_triggered();
 	void on_actionAdvAudioProperties_triggered();
 	void on_advAudioProps_clicked();
+	void on_advAudioProps_destroyed();
 	void on_actionShowLogs_triggered();
 	void on_actionUploadCurrentLog_triggered();
 	void on_actionUploadLastLog_triggered();
+	void on_actionViewCurrentLog_triggered();
 	void on_actionCheckForUpdates_triggered();
 
 	void on_actionEditTransform_triggered();
@@ -278,9 +315,13 @@ private slots:
 	void on_recordButton_clicked();
 	void on_settingsButton_clicked();
 
-	void logUploadFinished();
+	void on_preview_customContextMenuRequested(const QPoint &pos);
+	void on_previewDisabledLabel_customContextMenuRequested(
+			const QPoint &pos);
 
-	void updateFileFinished();
+	void logUploadFinished(const QString &text, const QString &error);
+
+	void updateFileFinished(const QString &text, const QString &error);
 
 	void AddSourceFromAction();
 
@@ -291,6 +332,20 @@ private slots:
 			QAbstractItemDelegate::EndEditHint endHint);
 	void SceneItemNameEdited(QWidget *editor,
 			QAbstractItemDelegate::EndEditHint endHint);
+
+	void OpenSceneFilters();
+	void OpenFilters();
+
+	void TogglePreview();
+
+	void NudgeUp();
+	void NudgeDown();
+	void NudgeLeft();
+	void NudgeRight();
+
+	void OpenPreviewProjector();
+	void OpenSourceProjector();
+	void OpenSceneProjector();
 
 public:
 	explicit OBSBasic(QWidget *parent = 0);

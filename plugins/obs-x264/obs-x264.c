@@ -153,7 +153,7 @@ static obs_properties_t *obs_x264_props(void *unused)
 
 	p = obs_properties_add_bool(props, "use_bufsize", TEXT_CUSTOM_BUF);
 	obs_property_set_modified_callback(p, use_bufsize_modified);
-	obs_properties_add_int(props, "buffer_size", TEXT_BUF_SIZE, 50,
+	obs_properties_add_int(props, "buffer_size", TEXT_BUF_SIZE, 0,
 			10000000, 1);
 
 	obs_properties_add_int(props, "keyint_sec", TEXT_KEYINT_SEC, 0, 20, 1);
@@ -346,11 +346,20 @@ static inline int get_x264_cs_val(enum video_colorspace cs,
 	return 0;
 }
 
+static void obs_x264_video_info(void *data, struct video_scale_info *info);
+
 static void update_params(struct obs_x264 *obsx264, obs_data_t *settings,
 		char **params)
 {
 	video_t *video = obs_encoder_video(obsx264->encoder);
 	const struct video_output_info *voi = video_output_get_info(video);
+	struct video_scale_info info;
+
+	info.format = voi->format;
+	info.colorspace = voi->colorspace;
+	info.range = voi->range;
+
+	obs_x264_video_info(obsx264, &info);
 
 	int bitrate      = (int)obs_data_get_int(settings, "bitrate");
 	int buffer_size  = (int)obs_data_get_int(settings, "buffer_size");
@@ -381,13 +390,13 @@ static void update_params(struct obs_x264 *obsx264, obs_data_t *settings,
 	obsx264->params.i_log_level          = X264_LOG_WARNING;
 
 	obsx264->params.vui.i_transfer =
-		get_x264_cs_val(voi->colorspace, x264_transfer_names);
+		get_x264_cs_val(info.colorspace, x264_transfer_names);
 	obsx264->params.vui.i_colmatrix =
-		get_x264_cs_val(voi->colorspace, x264_colmatrix_names);
+		get_x264_cs_val(info.colorspace, x264_colmatrix_names);
 	obsx264->params.vui.i_colorprim =
-		get_x264_cs_val(voi->colorspace, x264_colorprim_names);
+		get_x264_cs_val(info.colorspace, x264_colorprim_names);
 	obsx264->params.vui.b_fullrange =
-		voi->range == VIDEO_RANGE_FULL;
+		info.range == VIDEO_RANGE_FULL;
 
 	/* use the new filler method for CBR to allow real-time adjusting of
 	 * the bitrate */
@@ -405,10 +414,12 @@ static void update_params(struct obs_x264 *obsx264, obs_data_t *settings,
 		obsx264->params.rc.f_rf_constant = (float)crf;
 	}
 
-	if (voi->format == VIDEO_FORMAT_NV12)
+	if (info.format == VIDEO_FORMAT_NV12)
 		obsx264->params.i_csp = X264_CSP_NV12;
-	else if (voi->format == VIDEO_FORMAT_I420)
+	else if (info.format == VIDEO_FORMAT_I420)
 		obsx264->params.i_csp = X264_CSP_I420;
+	else if (info.format == VIDEO_FORMAT_I444)
+		obsx264->params.i_csp = X264_CSP_I444;
 	else
 		obsx264->params.i_csp = X264_CSP_NV12;
 
@@ -579,6 +590,8 @@ static inline void init_pic_data(struct obs_x264 *obsx264, x264_picture_t *pic,
 		pic->img.i_plane = 2;
 	else if (obsx264->params.i_csp == X264_CSP_I420)
 		pic->img.i_plane = 3;
+	else if (obsx264->params.i_csp == X264_CSP_I444)
+		pic->img.i_plane = 3;
 
 	for (int i = 0; i < pic->img.i_plane; i++) {
 		pic->img.i_stride[i] = (int)frame->linesize[i];
@@ -638,23 +651,26 @@ static bool obs_x264_sei(void *data, uint8_t **sei, size_t *size)
 	return true;
 }
 
-static bool obs_x264_video_info(void *data, struct video_scale_info *info)
+static inline bool valid_format(enum video_format format)
+{
+	return format == VIDEO_FORMAT_I420 ||
+	       format == VIDEO_FORMAT_NV12 ||
+	       format == VIDEO_FORMAT_I444;
+}
+
+static void obs_x264_video_info(void *data, struct video_scale_info *info)
 {
 	struct obs_x264 *obsx264 = data;
-	video_t *video = obs_encoder_video(obsx264->encoder);
-	const struct video_output_info *vid_info = video_output_get_info(video);
+	enum video_format pref_format;
 
-	if (vid_info->format == VIDEO_FORMAT_I420 ||
-	    vid_info->format == VIDEO_FORMAT_NV12)
-		return false;
+	pref_format = obs_encoder_get_preferred_video_format(obsx264->encoder);
 
-	info->format     = VIDEO_FORMAT_NV12;
-	info->width      = vid_info->width;
-	info->height     = vid_info->height;
-	info->range      = vid_info->range;
-	info->colorspace = vid_info->colorspace;
+	if (!valid_format(pref_format)) {
+		pref_format = valid_format(info->format) ?
+			info->format : VIDEO_FORMAT_NV12;
+	}
 
-	return true;
+	info->format = pref_format;
 }
 
 struct obs_encoder_info obs_x264_encoder = {

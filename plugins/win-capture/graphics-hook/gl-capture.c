@@ -1,6 +1,10 @@
 #define _CRT_SECURE_NO_WARNINGS
+
+#ifdef _MSC_VER
 #pragma warning(disable : 4214) /* nonstandard extension, non-int bitfield */
 #pragma warning(disable : 4054) /* function pointer to data pointer */
+#endif
+
 #include <windows.h>
 
 #define COBJMACROS
@@ -248,7 +252,7 @@ static inline bool gl_shtex_init_window(void)
 
 typedef HRESULT (WINAPI *create_dxgi_factory1_t)(REFIID, void **);
 
-const static D3D_FEATURE_LEVEL feature_levels[] =
+static const D3D_FEATURE_LEVEL feature_levels[] =
 {
 	D3D_FEATURE_LEVEL_11_0,
 	D3D_FEATURE_LEVEL_10_1,
@@ -426,7 +430,7 @@ static bool gl_shtex_init(HWND window)
 	}
 	if (!capture_init_shtex(&data.shtex_info, window,
 				data.base_cx, data.base_cy, data.cx, data.cy,
-				data.format, true, (uint32_t)data.handle)) {
+				data.format, true, (uintptr_t)data.handle)) {
 		return false;
 	}
 
@@ -552,34 +556,34 @@ static void gl_init(HDC hdc)
 static void gl_copy_backbuffer(GLuint dst)
 {
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, data.fbo);
-	if (gl_error("gl_shtex_capture_blit", "failed to bind FBO")) {
+	if (gl_error("gl_copy_backbuffer", "failed to bind FBO")) {
 		return;
 	}
 
 	glBindTexture(GL_TEXTURE_2D, dst);
-	if (gl_error("gl_shtex_capture_blit", "failed to bind texture")) {
+	if (gl_error("gl_copy_backbuffer", "failed to bind texture")) {
 		return;
 	}
 
 	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
 			GL_TEXTURE_2D, dst, 0);
-	if (gl_error("gl_shtex_capture_blit", "failed to set frame buffer")) {
+	if (gl_error("gl_copy_backbuffer", "failed to set frame buffer")) {
 		return;
 	}
 
 	glReadBuffer(GL_BACK);
-	if (gl_error("gl_shtex_capture_blit", "failed to set read buffer")) {
+	if (gl_error("gl_copy_backbuffer", "failed to set read buffer")) {
 		return;
 	}
 
 	glDrawBuffer(GL_COLOR_ATTACHMENT0);
-	if (gl_error("gl_shtex_capture_blit", "failed to set draw buffer")) {
+	if (gl_error("gl_copy_backbuffer", "failed to set draw buffer")) {
 		return;
 	}
 
 	glBlitFramebuffer(0, 0, data.base_cx, data.base_cy,
 			0, 0, data.cx, data.cy, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-	gl_error("gl_shtex_capture_blit", "failed to blit");
+	gl_error("gl_copy_backbuffer", "failed to blit");
 }
 
 static void gl_shtex_capture(void)
@@ -697,7 +701,6 @@ static void gl_capture(HDC hdc)
 {
 	static bool functions_initialized = false;
 	static bool critical_failure = false;
-	static bool reacquireing = false;
 
 	if (critical_failure) {
 		return;

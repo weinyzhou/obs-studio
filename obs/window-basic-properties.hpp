@@ -22,8 +22,7 @@
 #include <memory>
 #include <obs.hpp>
 
-#include "properties-view.hpp"
-
+class OBSPropertiesView;
 class OBSBasic;
 
 #include "ui_OBSBasicProperties.h"
@@ -40,16 +39,19 @@ private:
 	OBSSource  source;
 	OBSDisplay display;
 	OBSSignal  removedSignal;
+	OBSSignal  renamedSignal;
 	OBSSignal  updatePropertiesSignal;
 	OBSData    oldSettings;
 	OBSPropertiesView *view;
 	QDialogButtonBox *buttonBox;
 
 	static void SourceRemoved(void *data, calldata_t *params);
+	static void SourceRenamed(void *data, calldata_t *params);
 	static void UpdateProperties(void *data, calldata_t *params);
 	static void DrawPreview(void *data, uint32_t cx, uint32_t cy);
 	bool ConfirmQuit();
 	int  CheckSettings();
+	void Cleanup();
 
 private slots:
 	void OnPropertiesResized();
@@ -57,6 +59,7 @@ private slots:
 
 public:
 	OBSBasicProperties(QWidget *parent, OBSSource source_);
+	~OBSBasicProperties();
 
 	void Init();
 
@@ -64,4 +67,5 @@ protected:
 	virtual void resizeEvent(QResizeEvent *event) override;
 	virtual void timerEvent(QTimerEvent *event) override;
 	virtual void closeEvent(QCloseEvent *event) override;
+	virtual void reject() override;
 };

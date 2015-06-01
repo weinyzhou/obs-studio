@@ -137,6 +137,7 @@ static inline void effect_technique_free(struct gs_effect_technique *t)
 
 struct gs_effect {
 	bool processing;
+	bool cached;
 	char *effect_path, *effect_dir;
 
 	DARRAY(struct gs_effect_param) params;
@@ -147,6 +148,8 @@ struct gs_effect {
 
 	gs_eparam_t *view_proj, *world, *scale;
 	graphics_t *graphics;
+
+	struct gs_effect *next;
 
 	size_t loop_pass;
 	bool looping;

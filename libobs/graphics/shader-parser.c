@@ -15,6 +15,7 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 ******************************************************************************/
 
+#include "../util/platform.h"
 #include "shader-parser.h"
 
 enum gs_shader_param_type get_shader_param_type(const char *type)
@@ -472,19 +473,29 @@ static inline int sp_parse_param_assign_intfloat(struct shader_parser *sp,
 		struct shader_var *param, bool is_float)
 {
 	int code;
+	bool is_negative = false;
 
 	if (!cf_next_valid_token(&sp->cfp))
 		return PARSE_EOF;
+
+	if (cf_token_is(&sp->cfp, "-")) {
+		is_negative = true;
+
+		if (!cf_next_token(&sp->cfp))
+			return PARSE_EOF;
+	}
 
 	code = cf_token_is_type(&sp->cfp, CFTOKEN_NUM, "numeric value", ";");
 	if (code != PARSE_SUCCESS)
 		return code;
 
 	if (is_float) {
-		float f = (float)strtod(sp->cfp.cur_token->str.array, NULL);
+		float f = (float)os_strtod(sp->cfp.cur_token->str.array);
+		if (is_negative) f = -f;
 		da_push_back_array(param->default_val, &f, sizeof(float));
 	} else {
 		long l = strtol(sp->cfp.cur_token->str.array, NULL, 10);
+		if (is_negative) l = -l;
 		da_push_back_array(param->default_val, &l, sizeof(long));
 	}
 

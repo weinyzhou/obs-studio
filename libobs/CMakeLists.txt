@@ -46,9 +46,12 @@ if(WIN32)
 		util/threading-windows.c
 		util/pipe-windows.c
 		util/platform-windows.c)
-	set(libobs_PLATFORM_DEPS
-		w32-pthreads
-		winmm.lib)
+	set(libobs_PLATFORM_DEPS winmm)
+	if(MSVC)
+		set(libobs_PLATFORM_DEPS
+		${libobs_PLATFORM_DEPS}
+		w32-pthreads)
+	endif()
 elseif(APPLE)
 	set(libobs_PLATFORM_SOURCES
 		obs-cocoa.c
@@ -66,14 +69,38 @@ elseif(APPLE)
 	mark_as_advanced(COCOA)
 	include_directories(${COCOA})
 
+	find_library(APPKIT AppKit)
+	mark_as_advanced(APPKIT)
+	include_directories(${APPKIT})
+
+	find_library(IOKIT IOKit)
+	mark_as_advanced(IOKIT)
+	include_directories(${IOKIT})
+
+	find_library(CARBON Carbon)
+	mark_as_advanced(CARBON)
+	include_directories(${CARBON})
+
 	set(libobs_PLATFORM_DEPS
-		${COCOA})
+		${COCOA}
+		${APPKIT}
+		${IOKIT}
+		${CARBON})
 elseif(UNIX)
 	set(libobs_PLATFORM_SOURCES
 		obs-nix.c
 		util/threading-posix.c
 		util/pipe-posix.c
 		util/platform-nix.c)
+
+	if(${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
+		# use the sysinfo compatibility library on bsd
+		find_package(Libsysinfo REQUIRED)
+		include_directories(${SYSINFO_INCLUDE_DIRS})
+		set(libobs_PLATFORM_DEPS
+			${libobs_PLATFORM_DEPS}
+			${SYSINFO_LIBRARIES})
+	endif()
 endif()
 
 if(MSVC)
@@ -204,6 +231,8 @@ set(libobs_libobs_SOURCES
 	obs.c
 	obs-properties.c
 	obs-data.c
+	obs-hotkey.c
+	obs-hotkey-name-map.c
 	obs-module.c
 	obs-display.c
 	obs-view.c
@@ -221,6 +250,8 @@ set(libobs_libobs_HEADERS
 	obs-properties.h
 	obs-data.h
 	obs-interaction.h
+	obs-hotkey.h
+	obs-hotkeys.h
 	obs-module.h
 	obs-scene.h
 	obs-source.h

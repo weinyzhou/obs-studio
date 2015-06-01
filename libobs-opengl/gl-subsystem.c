@@ -658,6 +658,11 @@ static bool set_current_fbo(gs_device_t *device, struct fbo_info *fbo)
 		GLuint fbo_obj = fbo ? fbo->fbo : 0;
 		if (!gl_bind_framebuffer(GL_DRAW_FRAMEBUFFER, fbo_obj))
 			return false;
+
+		if (device->cur_fbo) {
+			device->cur_fbo->cur_render_target = NULL;
+			device->cur_fbo->cur_zstencil_buffer = NULL;
+		}
 	}
 
 	device->cur_fbo = fbo;
@@ -877,10 +882,25 @@ static inline bool can_render(const gs_device_t *device)
 static void update_viewproj_matrix(struct gs_device *device)
 {
 	struct gs_shader *vs = device->cur_vertex_shader;
-	gs_matrix_get(&device->cur_view);
+	struct matrix4 cur_proj;
 
-	matrix4_mul(&device->cur_viewproj, &device->cur_view,
-			&device->cur_proj);
+	gs_matrix_get(&device->cur_view);
+	matrix4_copy(&cur_proj, &device->cur_proj);
+
+	if (device->cur_fbo) {
+		cur_proj.x.y = -cur_proj.x.y;
+		cur_proj.y.y = -cur_proj.y.y;
+		cur_proj.z.y = -cur_proj.z.y;
+		cur_proj.t.y = -cur_proj.t.y;
+
+		glFrontFace(GL_CW);
+	} else {
+		glFrontFace(GL_CCW);
+	}
+
+	gl_success("glFrontFace");
+
+	matrix4_mul(&device->cur_viewproj, &device->cur_view, &cur_proj);
 	matrix4_transpose(&device->cur_viewproj, &device->cur_viewproj);
 
 	if (vs->viewproj)
@@ -1091,6 +1111,22 @@ void device_blend_function(gs_device_t *device, enum gs_blend_type src,
 	glBlendFunc(gl_src, gl_dst);
 	if (!gl_success("glBlendFunc"))
 		blog(LOG_ERROR, "device_blend_function (GL) failed");
+
+	UNUSED_PARAMETER(device);
+}
+
+void device_blend_function_separate(gs_device_t *device,
+		enum gs_blend_type src_c, enum gs_blend_type dest_c,
+		enum gs_blend_type src_a, enum gs_blend_type dest_a)
+{
+	GLenum gl_src_c = convert_gs_blend_type(src_c);
+	GLenum gl_dst_c = convert_gs_blend_type(dest_c);
+	GLenum gl_src_a = convert_gs_blend_type(src_a);
+	GLenum gl_dst_a = convert_gs_blend_type(dest_a);
+
+	glBlendFuncSeparate(gl_src_c, gl_dst_c, gl_src_a, gl_dst_a);
+	if (!gl_success("glBlendFuncSeparate"))
+		blog(LOG_ERROR, "device_blend_function_separate (GL) failed");
 
 	UNUSED_PARAMETER(device);
 }

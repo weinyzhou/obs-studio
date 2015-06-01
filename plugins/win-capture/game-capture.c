@@ -86,6 +86,7 @@ struct game_capture {
 	bool                          error_acquiring : 1;
 	bool                          dwm_capture : 1;
 	bool                          initial_config : 1;
+	bool                          convert_16bit : 1;
 
 	struct game_capture_config    config;
 
@@ -352,14 +353,14 @@ static inline HANDLE create_event_id(bool manual_reset, bool initial_state,
 		const char *name, DWORD process_id)
 {
 	char new_name[128];
-	sprintf(new_name, "%s%d", name, process_id);
+	sprintf(new_name, "%s%lu", name, process_id);
 	return CreateEventA(NULL, manual_reset, initial_state, new_name);
 }
 
 static inline HANDLE open_event_id(const char *name, DWORD process_id)
 {
 	char new_name[128];
-	sprintf(new_name, "%s%d", name, process_id);
+	sprintf(new_name, "%s%lu", name, process_id);
 	return OpenEventA(EVENT_ALL_ACCESS, false, new_name);
 }
 
@@ -542,7 +543,7 @@ static void pipe_log(void *param, uint8_t *data, size_t size)
 static inline bool init_pipe(struct game_capture *gc)
 {
 	char name[64];
-	sprintf(name, "%s%d", PIPE_NAME, gc->process_id);
+	sprintf(name, "%s%lu", PIPE_NAME, gc->process_id);
 
 	if (!ipc_pipe_server_start(&gc->pipe, name, pipe_log, gc)) {
 		warn("init_pipe: failed to start pipe");
@@ -738,7 +739,7 @@ static void try_hook(struct game_capture *gc)
 
 		if (!gc->thread_id || !gc->process_id) {
 			warn("error acquiring, failed to get window "
-					"thread/process ids: %d",
+					"thread/process ids: %lu",
 					GetLastError());
 			gc->error_acquiring = true;
 			return;
@@ -797,7 +798,13 @@ static inline bool init_events(struct game_capture *gc)
 	return true;
 }
 
-static inline bool init_capture_data(struct game_capture *gc)
+enum capture_result {
+	CAPTURE_FAIL,
+	CAPTURE_RETRY,
+	CAPTURE_SUCCESS
+};
+
+static inline enum capture_result init_capture_data(struct game_capture *gc)
 {
 	char name[64];
 	sprintf(name, "%s%u", SHMEM_TEXTURE, gc->global_hook_info->map_id);
@@ -817,14 +824,12 @@ static inline bool init_capture_data(struct game_capture *gc)
 	if (!gc->hook_data_map) {
 		DWORD error = GetLastError();
 		if (error == 2) {
-			info("init_capture_data: file mapping not found, "
-			     "retrying.  (this is often normal, and may take "
-			     "a few tries)");
+			return CAPTURE_RETRY;
 		} else {
 			warn("init_capture_data: failed to open file "
 			     "mapping: %lu", error);
 		}
-		return false;
+		return CAPTURE_FAIL;
 	}
 
 	gc->data = MapViewOfFile(gc->hook_data_map, FILE_MAP_ALL_ACCESS, 0, 0,
@@ -832,10 +837,98 @@ static inline bool init_capture_data(struct game_capture *gc)
 	if (!gc->data) {
 		warn("init_capture_data: failed to map data view: %lu",
 				GetLastError());
-		return false;
+		return CAPTURE_FAIL;
 	}
 
-	return true;
+	return CAPTURE_SUCCESS;
+}
+
+#define PIXEL_16BIT_SIZE 2
+#define PIXEL_32BIT_SIZE 4
+
+static inline uint32_t convert_5_to_8bit(uint16_t val)
+{
+	return (uint32_t)((double)(val & 0x1F) * (255.0/31.0));
+}
+
+static inline uint32_t convert_6_to_8bit(uint16_t val)
+{
+	return (uint32_t)((double)(val & 0x3F) * (255.0/63.0));
+}
+
+static void copy_b5g6r5_tex(struct game_capture *gc, int cur_texture,
+		uint8_t *data, uint32_t pitch)
+{
+	uint8_t *input = gc->texture_buffers[cur_texture];
+	uint32_t gc_cx = gc->cx;
+	uint32_t gc_cy = gc->cy;
+	uint32_t gc_pitch = gc->pitch;
+
+	for (uint32_t y = 0; y < gc_cy; y++) {
+		register uint8_t *in  = input + (gc_pitch * y);
+		register uint8_t *end = in + (gc_cx * PIXEL_16BIT_SIZE);
+		register uint8_t *out = data  + (pitch * y);
+
+		while (in < end) {
+			register uint16_t in_pix = *(uint16_t*)in;
+			register uint32_t out_pix = 0xFF000000;
+
+			out_pix |= convert_5_to_8bit(in_pix);
+			in_pix >>= 5;
+			out_pix |= convert_6_to_8bit(in_pix) << 8;
+			in_pix >>= 6;
+			out_pix |= convert_5_to_8bit(in_pix) << 16;
+
+			*(uint32_t*)out = out_pix;
+
+			in  += PIXEL_16BIT_SIZE;
+			out += PIXEL_32BIT_SIZE;
+		}
+	}
+}
+
+static void copy_b5g5r5a1_tex(struct game_capture *gc, int cur_texture,
+		uint8_t *data, uint32_t pitch)
+{
+	uint8_t *input = gc->texture_buffers[cur_texture];
+	uint32_t gc_cx = gc->cx;
+	uint32_t gc_cy = gc->cy;
+	uint32_t gc_pitch = gc->pitch;
+
+	for (uint32_t y = 0; y < gc_cy; y++) {
+		register uint8_t *in  = input + (gc_pitch * y);
+		register uint8_t *end = in + (gc_cx * PIXEL_16BIT_SIZE);
+		register uint8_t *out = data  + (pitch * y);
+
+		while (in < end) {
+			register uint16_t in_pix = *(uint16_t*)in;
+			register uint32_t out_pix = 0;
+
+			out_pix |= convert_5_to_8bit(in_pix);
+			in_pix >>= 5;
+			out_pix |= convert_5_to_8bit(in_pix) << 8;
+			in_pix >>= 5;
+			out_pix |= convert_5_to_8bit(in_pix) << 16;
+			in_pix >>= 5;
+			out_pix |= (in_pix * 255) << 24;
+
+			*(uint32_t*)out = out_pix;
+
+			in  += PIXEL_16BIT_SIZE;
+			out += PIXEL_32BIT_SIZE;
+		}
+	}
+}
+
+static inline void copy_16bit_tex(struct game_capture *gc, int cur_texture,
+		uint8_t *data, uint32_t pitch)
+{
+	if (gc->global_hook_info->format == DXGI_FORMAT_B5G5R5A1_UNORM) {
+		copy_b5g5r5a1_tex(gc, cur_texture, data, pitch);
+
+	} else if (gc->global_hook_info->format == DXGI_FORMAT_B5G6R5_UNORM) {
+		copy_b5g6r5_tex(gc, cur_texture, data, pitch);
+	}
 }
 
 static void copy_shmem_tex(struct game_capture *gc)
@@ -863,7 +956,10 @@ static void copy_shmem_tex(struct game_capture *gc)
 	}
 
 	if (gs_texture_map(gc->texture, &data, &pitch)) {
-		if (pitch == gc->pitch) {
+		if (gc->convert_16bit) {
+			copy_16bit_tex(gc, cur_texture, data, pitch);
+
+		} else if (pitch == gc->pitch) {
 			memcpy(data, gc->texture_buffers[cur_texture],
 					pitch * gc->cy);
 		} else {
@@ -884,18 +980,29 @@ static void copy_shmem_tex(struct game_capture *gc)
 	ReleaseMutex(mutex);
 }
 
+static inline bool is_16bit_format(uint32_t format)
+{
+	return format == DXGI_FORMAT_B5G5R5A1_UNORM ||
+	       format == DXGI_FORMAT_B5G6R5_UNORM;
+}
+
 static inline bool init_shmem_capture(struct game_capture *gc)
 {
+	enum gs_color_format format;
+
 	gc->texture_buffers[0] =
 		(uint8_t*)gc->data + gc->shmem_data->tex1_offset;
 	gc->texture_buffers[1] =
 		(uint8_t*)gc->data + gc->shmem_data->tex2_offset;
 
+	gc->convert_16bit = is_16bit_format(gc->global_hook_info->format);
+	format = gc->convert_16bit ?
+		GS_BGRA : convert_format(gc->global_hook_info->format);
+
 	obs_enter_graphics();
 	gs_texture_destroy(gc->texture);
-	gc->texture = gs_texture_create(gc->cx, gc->cy,
-			convert_format(gc->global_hook_info->format),
-			1, NULL, GS_DYNAMIC);
+	gc->texture = gs_texture_create(gc->cx, gc->cy, format, 1, NULL,
+			GS_DYNAMIC);
 	obs_leave_graphics();
 
 	if (!gc->texture) {
@@ -927,9 +1034,6 @@ static bool start_capture(struct game_capture *gc)
 	if (!init_events(gc)) {
 		return false;
 	}
-	if (!init_capture_data(gc)) {
-		return false;
-	}
 	if (gc->global_hook_info->type == CAPTURE_TYPE_MEMORY) {
 		if (!init_shmem_capture(gc)) {
 			return false;
@@ -941,6 +1045,14 @@ static bool start_capture(struct game_capture *gc)
 	}
 
 	return true;
+}
+
+static inline bool capture_valid(struct game_capture *gc)
+{
+	if (!gc->dwm_capture && !IsWindow(gc->window))
+	       return false;
+	
+	return !object_signalled(gc->target_process);
 }
 
 static void game_capture_tick(void *data, float seconds)
@@ -963,7 +1075,7 @@ static void game_capture_tick(void *data, float seconds)
 		close_handle(&gc->injector_process);
 
 		if (exit_code != 0) {
-			warn("inject process failed: %d", exit_code);
+			warn("inject process failed: %lu", exit_code);
 			gc->error_acquiring = true;
 
 		} else if (!gc->capturing) {
@@ -973,8 +1085,12 @@ static void game_capture_tick(void *data, float seconds)
 	}
 
 	if (gc->hook_ready && object_signalled(gc->hook_ready)) {
-		gc->capturing = start_capture(gc);
-		if (!gc->capturing) {
+		enum capture_result result = init_capture_data(gc);
+
+		if (result == CAPTURE_SUCCESS)
+			gc->capturing = start_capture(gc);
+
+		if (result != CAPTURE_RETRY && !gc->capturing) {
 			gc->retry_interval = ERROR_RETRY_INTERVAL;
 			stop_capture(gc);
 		}
@@ -992,8 +1108,7 @@ static void game_capture_tick(void *data, float seconds)
 			}
 		}
 	} else {
-		if (!IsWindow(gc->window) && !gc->dwm_capture ||
-		    object_signalled(gc->target_process)) {
+		if (!capture_valid(gc)) {
 			info("capture window no longer exists, "
 			     "terminating capture");
 			stop_capture(gc);
@@ -1028,7 +1143,7 @@ static inline void game_capture_render_cursor(struct game_capture *gc)
 	    !gc->global_hook_info->base_cy)
 		return;
 
-	ClientToScreen((HWND)gc->global_hook_info->window, &p);
+	ClientToScreen((HWND)(uintptr_t)gc->global_hook_info->window, &p);
 
 	float x_scale = (float)gc->global_hook_info->cx /
 		(float)gc->global_hook_info->base_cx;
@@ -1046,23 +1161,22 @@ static void game_capture_render(void *data, gs_effect_t *effect)
 	if (!gc->texture)
 		return;
 
-	effect = obs_get_default_effect();
+	effect = gc->config.allow_transparency ?
+		obs_get_default_effect() : obs_get_opaque_effect();
 
 	while (gs_effect_loop(effect, "Draw")) {
-		if (!gc->config.allow_transparency) {
-			gs_enable_blending(false);
-			gs_enable_color(true, true, true, false);
-		}
-
 		obs_source_draw(gc->texture, 0, 0, 0, 0,
 				gc->global_hook_info->flip);
 
-		if (!gc->config.allow_transparency) {
-			gs_enable_blending(true);
-			gs_enable_color(true, true, true, true);
+		if (gc->config.allow_transparency && gc->config.cursor) {
+			game_capture_render_cursor(gc);
 		}
+	}
 
-		if (gc->config.cursor) {
+	if (!gc->config.allow_transparency && gc->config.cursor) {
+		effect = obs_get_default_effect();
+
+		while (gs_effect_loop(effect, "Draw")) {
 			game_capture_render_cursor(gc);
 		}
 	}
@@ -1146,8 +1260,6 @@ static void insert_preserved_val(obs_property_t *p, const char *val)
 static bool window_changed_callback(obs_properties_t *ppts, obs_property_t *p,
 		obs_data_t *settings)
 {
-	const char *active_window = obs_data_get_string(settings,
-			SETTING_ACTIVE_WINDOW);
 	const char *cur_val;
 	bool match = false;
 	size_t i = 0;
@@ -1173,6 +1285,7 @@ static bool window_changed_callback(obs_properties_t *ppts, obs_property_t *p,
 		return true;
 	}
 
+	UNUSED_PARAMETER(ppts);
 	return false;
 }
 
@@ -1191,12 +1304,14 @@ static BOOL CALLBACK EnumFirstMonitor(HMONITOR monitor, HDC hdc,
 		LPRECT rc, LPARAM data)
 {
 	*(HMONITOR*)data = monitor;
+
+	UNUSED_PARAMETER(hdc);
+	UNUSED_PARAMETER(rc);
 	return false;
 }
 
 static obs_properties_t *game_capture_properties(void *data)
 {
-	struct game_capture *gc = data;
 	HMONITOR monitor;
 	uint32_t cx = 1920;
 	uint32_t cy = 1080;

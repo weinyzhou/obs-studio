@@ -63,6 +63,12 @@ static inline enum video_format v4l2_to_obs_video_format(uint_fast32_t format)
 	case V4L2_PIX_FMT_NV12:   return VIDEO_FORMAT_NV12;
 	case V4L2_PIX_FMT_YUV420: return VIDEO_FORMAT_I420;
 	case V4L2_PIX_FMT_YVU420: return VIDEO_FORMAT_I420;
+#ifdef V4L2_PIX_FMT_XBGR32
+	case V4L2_PIX_FMT_XBGR32: return VIDEO_FORMAT_BGRX;
+#endif
+#ifdef V4L2_PIX_FMT_ABGR32
+	case V4L2_PIX_FMT_ABGR32: return VIDEO_FORMAT_BGRA;
+#endif
 	default:                  return VIDEO_FORMAT_NONE;
 	}
 }
@@ -200,7 +206,6 @@ int_fast32_t v4l2_create_mmap(int_fast32_t dev, struct v4l2_buffer_data *buf);
 /**
  * Destroy the memory mapping for buffers
  *
- * @param dev handle for the v4l2 device
  * @param buf buffer data
  *
  * @return negative on failure
@@ -218,6 +223,17 @@ int_fast32_t v4l2_destroy_mmap(struct v4l2_buffer_data *buf);
  * @return negative on failure
  */
 int_fast32_t v4l2_set_input(int_fast32_t dev, int *input);
+
+/**
+ * Get capabilities for an input.
+ *
+ * @param dev handle for the v4l2 device
+ * @param input index of the input or -1 to use the currently selected
+ * @param caps capabilities for the input
+ *
+ * @return negative on failure
+ */
+int_fast32_t v4l2_get_input_caps(int_fast32_t dev, int input, uint32_t *caps);
 
 /**
  * Set the video format on the device.
@@ -246,6 +262,41 @@ int_fast32_t v4l2_set_format(int_fast32_t dev, int *resolution,
  * @return negative on failure
  */
 int_fast32_t v4l2_set_framerate(int_fast32_t dev, int *framerate);
+
+/**
+ * Set a video standard on the device.
+ *
+ * If the action succeeds standard is set to the used video standard id.
+ *
+ * @param dev handle to the v4l2 device
+ * @param standard id of the standard to use or -1 to leave as is
+ *
+ * @return negative on failure
+ */
+int_fast32_t v4l2_set_standard(int_fast32_t dev, int *standard);
+
+/**
+ * Get the dv timing for an input with a specified index
+ *
+ * @param dev handle to the v4l2 device
+ * @param dvt pointer to the timing structure to fill
+ * @param index index of the dv timing to fetch
+ *
+ * @return negative on failure
+ */
+int_fast32_t v4l2_enum_dv_timing(int_fast32_t dev, struct v4l2_dv_timings *dvt,
+		int index);
+/**
+ * Set a dv timing on the device
+ *
+ * Currently standard will not be changed on success or error.
+ *
+ * @param dev handle to the v4l2 device
+ * @param timing index of the timing to use or -1 to leave as is
+ *
+ * @return negative on failure
+ */
+int_fast32_t v4l2_set_dv_timing(int_fast32_t dev, int *timing);
 
 #ifdef __cplusplus
 }

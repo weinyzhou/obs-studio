@@ -244,24 +244,27 @@ struct obs_source_info {
 	 *
 	 * @note          This function is only used with filter sources.
 	 *
-	 * @param  data   Source data
+	 * @param  data   Filter data
 	 * @param  frame  Video frame to filter
 	 * @return        New video frame data.  This can defer video data to
 	 *                be drawn later if time is needed for processing
 	 */
 	struct obs_source_frame *(*filter_video)(void *data,
-			const struct obs_source_frame *frame);
+			struct obs_source_frame *frame);
 
 	/**
 	 * Called to filter raw audio data.
 	 *
 	 * @note          This function is only used with filter sources.
 	 *
-	 * @param  data   Source data
+	 * @param  data   Filter data
 	 * @param  audio  Audio data to filter.
 	 * @return        Modified or new audio data.  You can directly modify
 	 *                the data passed and return it, or you can defer audio
-	 *                data for later if time is needed for processing.
+	 *                data for later if time is needed for processing.  If
+	 *                you are returning new data, that data must exist
+	 *                until the next call to the filter_audio callback or
+	 *                until the filter is removed/destroyed.
 	 */
 	struct obs_audio_data *(*filter_audio)(void *data,
 			struct obs_audio_data *audio);
@@ -270,7 +273,7 @@ struct obs_source_info {
 	 * Called to enumerate all sources being used within this source.
 	 * If the source has children it must implement this callback.
 	 *
-	 * @param  data           Source data
+	 * @param  data           Filter data
 	 * @param  enum_callback  Enumeration callback
 	 * @param  param          User data to pass to callback
 	 */
@@ -361,6 +364,14 @@ struct obs_source_info {
 	 * @param source       Transitioning sub-source to get the volume of
 	 */
 	float (*get_transition_volume)(void *data, obs_source_t *source);
+
+	/**
+	 * Called when the filter is removed from a source
+	 *
+	 * @param  data    Filter data
+	 * @param  source  Source that the filter being removed from
+	 */
+	void (*filter_remove)(void *data, obs_source_t *source);
 };
 
 EXPORT void obs_register_source_s(const struct obs_source_info *info,

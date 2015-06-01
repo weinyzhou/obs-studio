@@ -1,15 +1,14 @@
 Compilation instructions!  Temporary quick compilation instructions!
 Will give better instructions later when things are in a more complete state.
 
+
 Windows:
+  - Load git submodules (required):
+      git submodule init && git submodule update
+
   - NOTE: OBS on windows currently requires VS2013, as obs-studio uses C99 and
     C++11.  Express might not be supported at this time (though I'll fix it at
     some point).
-
-  - Clone the repo.  After cloning, run the following git commands:
-        git submodule init
-        git submodule update
-    which will download submodules.
 
   - Download (or build) development packages of FFmpeg, x264, Qt5.
 
@@ -72,6 +71,9 @@ Windows:
 
 
 Mac OSX
+  - Load git submodules (required):
+      git submodule init && git submodule update
+
   - Use macports or homebrew and install FFmpeg, x264, Qt5, and cmake.
 
     NOTE: Qt5 can also be downloaded/installed via the Qt website, though keep
@@ -100,13 +102,17 @@ Mac OSX
     This will create a .dmg file with an app bundle inside.
 
 
-Linux (Ubuntu 14.04 installation)
+Linux (Ubuntu 14.04/14.10/15.04 installation)
   - FFmpeg is required.  If you do not have the FFmpeg installed (if you're not
     sure, then you probably don't have it), you can get it with the following
     commands:
 
-        sudo add-apt-repository ppa:jon-severinsson/ffmpeg
+    For Ubuntu 14.04/14.10:
+        sudo add-apt-repository ppa:kirillshkrogalev/ffmpeg-next
         sudo apt-get update && sudo apt-get install ffmpeg
+
+    For Ubuntu 15.04:
+        sudo apt-get install ffmpeg
 
   - Then you can install OBS with the following commands:
 
@@ -126,6 +132,16 @@ Linux (Gentoo installation, unofficial)
   - Link:  https://github.com/saintdev/obs-studio-overlay
 
 
+Linux (NixOS installation)
+  - Get the latest Nix packages:
+
+    git clone https://github.com/nixos/nixpkgs ~/nixpkgs
+
+  - Install:
+
+    nix-env -f ~/nixpkgs -Q -i obs-studio
+
+
 Linux (Manually compiling on Redhat-based distros such as Fedora)
   - Get RPM fusion at http://rpmfusion.org/Configuration/
 
@@ -142,7 +158,7 @@ Linux (Manually compiling on Redhat-based distros such as Fedora)
 	sudo yum install libX11-devel libGL-devel ffmpeg-devel libv4l-devel \
                 pulseaudio-libs-devel x264-devel freetype-devel \
                 fontconfig-devel libXcomposite-devel libXinerama-devel \
-                qt5-qtbase-devel qt5-qtx11extras-devel
+                qt5-qtbase-devel qt5-qtx11extras-devel libcurl-devel
 
   - Building and installing OBS:
 
@@ -180,7 +196,7 @@ Linux (Manually compiling on Debian-based distros)
         sudo apt-get install libx11-dev libgl-dev libpulse-dev libxcomposite-dev \
                 libxinerama-dev libv4l-dev libudev-dev libfreetype6-dev \
                 libfontconfig-dev qtbase5-dev libqt5x11extras5-dev libx264-dev \
-                libxcb-xinerama0-dev libxcb-shm0-dev
+                libxcb-xinerama0-dev libxcb-shm0-dev libjack-jackd2-dev libcurl-dev
 
   - Building and installing OBS:
 

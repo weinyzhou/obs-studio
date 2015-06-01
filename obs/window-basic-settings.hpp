@@ -1,5 +1,6 @@
 /******************************************************************************
     Copyright (C) 2013 by Hugh Bailey <obs.jim@gmail.com>
+                          Philippe Groarke <philippe.groarke@gmail.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -20,6 +21,9 @@
 #include <util/util.hpp>
 #include <QDialog>
 #include <memory>
+#include <string>
+
+#include <libff/ff-util.h>
 
 #include <obs.h>
 
@@ -27,8 +31,50 @@ class OBSBasic;
 class QAbstractButton;
 class QComboBox;
 class OBSPropertiesView;
+class OBSHotkeyWidget;
 
 #include "ui_OBSBasicSettings.h"
+
+class SilentUpdateCheckBox : public QCheckBox {
+	Q_OBJECT
+
+public slots:
+	void setCheckedSilently(bool checked)
+	{
+		bool blocked = blockSignals(true);
+		setChecked(checked);
+		blockSignals(blocked);
+	}
+};
+
+class SilentUpdateSpinBox : public QSpinBox {
+	Q_OBJECT
+
+public slots:
+	void setValueSilently(int val)
+	{
+		bool blocked = blockSignals(true);
+		setValue(val);
+		blockSignals(blocked);
+	}
+};
+
+class OBSFFDeleter
+{
+public:
+	void operator()(const ff_format_desc *format)
+	{
+		ff_format_desc_free(format);
+	}
+	void operator()(const ff_codec_desc *codec)
+	{
+		ff_codec_desc_free(codec);
+	}
+};
+using OBSFFCodecDesc = std::unique_ptr<const ff_codec_desc,
+		OBSFFDeleter>;
+using OBSFFFormatDesc = std::unique_ptr<const ff_format_desc,
+		OBSFFDeleter>;
 
 class OBSBasicSettings : public QDialog {
 	Q_OBJECT
@@ -37,17 +83,36 @@ private:
 	OBSBasic *main;
 
 	std::unique_ptr<Ui::OBSBasicSettings> ui;
+
 	bool generalChanged = false;
 	bool stream1Changed = false;
 	bool outputsChanged = false;
 	bool audioChanged = false;
 	bool videoChanged = false;
+	bool hotkeysChanged = false;
+	bool advancedChanged = false;
 	int  pageIndex = 0;
 	bool loading = true;
+	std::string savedTheme;
+
+	OBSFFFormatDesc formats;
 
 	OBSPropertiesView *streamProperties = nullptr;
 	OBSPropertiesView *streamEncoderProps = nullptr;
 	OBSPropertiesView *recordEncoderProps = nullptr;
+
+	using AudioSource_t =
+		std::tuple<OBSWeakSource,
+			QPointer<QCheckBox>, QPointer<QSpinBox>,
+			QPointer<QCheckBox>, QPointer<QSpinBox>>;
+	std::vector<AudioSource_t> audioSources;
+	std::vector<OBSSignal> audioSourceSignals;
+	OBSSignal sourceCreated;
+	OBSSignal channelChanged;
+
+	std::vector<std::pair<bool, QPointer<OBSHotkeyWidget>>> hotkeys;
+	OBSSignal hotkeyRegistered;
+	OBSSignal hotkeyUnregistered;
 
 	void SaveCombo(QComboBox *widget, const char *section,
 			const char *value);
@@ -59,11 +124,15 @@ private:
 			const char *value);
 	void SaveSpinBox(QSpinBox *widget, const char *section,
 			const char *value);
+	void SaveFormat(QComboBox *combo);
+	void SaveEncoder(QComboBox *combo, const char *section,
+			const char *value);
 
 	inline bool Changed() const
 	{
 		return generalChanged || outputsChanged || stream1Changed ||
-			audioChanged || videoChanged;
+			audioChanged || videoChanged || advancedChanged ||
+			hotkeysChanged;
 	}
 
 	inline void EnableApplyButton(bool en)
@@ -78,6 +147,8 @@ private:
 		outputsChanged = false;
 		audioChanged   = false;
 		videoChanged   = false;
+		hotkeysChanged = false;
+		advancedChanged= false;
 		EnableApplyButton(false);
 	}
 
@@ -87,12 +158,17 @@ private:
 
 	void LoadServiceTypes();
 	void LoadEncoderTypes();
+	void LoadColorRanges();
+	void LoadFormats();
+	void ReloadCodecs(const ff_format_desc *formatDesc);
 
 	void LoadGeneralSettings();
 	void LoadStream1Settings();
 	void LoadOutputSettings();
 	void LoadAudioSettings();
 	void LoadVideoSettings();
+	void LoadHotkeySettings(obs_hotkey_id ignoreKey=OBS_INVALID_HOTKEY_ID);
+	void LoadAdvancedSettings();
 	void LoadSettings(bool changedOnly);
 
 	OBSPropertiesView *CreateEncoderPropertyView(const char *encoder,
@@ -100,6 +176,7 @@ private:
 
 	/* general */
 	void LoadLanguageList();
+	void LoadThemeList();
 
 	/* output */
 	void LoadSimpleOutputSettings();
@@ -109,15 +186,20 @@ private:
 	void LoadAdvOutputRecordingEncoderProperties();
 	void LoadAdvOutputFFmpegSettings();
 	void LoadAdvOutputAudioSettings();
+	void SetAdvOutputFFmpegEnablement(
+		ff_codec_type encoderType, bool enabled,
+		bool enableEncode = false);
 
 	/* audio */
 	void LoadListValues(QComboBox *widget, obs_property_t *prop,
 		const char *configName);
 	void LoadAudioDevices();
+	void LoadAudioSources();
 
 	/* video */
 	void LoadRendererList();
-	void ResetDownscales(uint32_t cx, uint32_t cy);
+	void ResetDownscales(uint32_t cx, uint32_t cy,
+			uint32_t out_cx, uint32_t out_cy);
 	void LoadDownscaleFilters();
 	void LoadResolutionLists();
 	void LoadFPSData();
@@ -127,9 +209,13 @@ private:
 	void SaveOutputSettings();
 	void SaveAudioSettings();
 	void SaveVideoSettings();
+	void SaveHotkeySettings();
+	void SaveAdvancedSettings();
 	void SaveSettings();
 
 private slots:
+	void on_theme_activated(int idx);
+
 	void on_simpleOutUseBufsize_toggled(bool checked);
 	void on_simpleOutputVBitrate_valueChanged(int val);
 
@@ -142,17 +228,27 @@ private slots:
 	void on_advOutFFPathBrowse_clicked();
 	void on_advOutEncoder_currentIndexChanged(int idx);
 	void on_advOutRecEncoder_currentIndexChanged(int idx);
+	void on_advOutFFFormat_currentIndexChanged(int idx);
+	void on_advOutFFAEncoder_currentIndexChanged(int idx);
+	void on_advOutFFVEncoder_currentIndexChanged(int idx);
+
+	void on_colorFormat_currentIndexChanged(const QString &text);
 
 	void on_baseResolution_editTextChanged(const QString &text);
 
 	void GeneralChanged();
 	void AudioChanged();
 	void AudioChangedRestart();
+	void ReloadAudioSources();
 	void OutputsChanged();
 	void Stream1Changed();
 	void VideoChanged();
 	void VideoChangedResolution();
 	void VideoChangedRestart();
+	void HotkeysChanged();
+	void ReloadHotkeys(obs_hotkey_id ignoreKey=OBS_INVALID_HOTKEY_ID);
+	void AdvancedChanged();
+	void AdvancedChangedRestart();
 
 protected:
 	virtual void closeEvent(QCloseEvent *event);

@@ -80,6 +80,7 @@ include (CheckFunctionExists)
 include (CheckFunctionKeywords)
 include (CheckIncludeFiles)
 include (CheckTypeSize)
+include (CheckSymbolExists)
 
 
 if (MSVC)
@@ -94,7 +95,7 @@ if (MSVC)
    
 endif()
 
-if (NOT WIN32 AND (CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX))
+if (NOT WIN32 AND NOT APPLE)
    set(CMAKE_C_FLAGS "-fPIC")
 endif()
 
@@ -221,8 +222,8 @@ else (HAVE_INLINE)
 endif (HAVE_INLINE)
 
 # Find our snprintf
-check_function_exists (snprintf HAVE_SNPRINTF)
-check_function_exists (_snprintf HAVE__SNPRINTF)
+check_symbol_exists(snprintf "stdio.h" HAVE_SNPRINTF)
+check_symbol_exists(_snprintf "stdio.h" HAVE__SNPRINTF)
 
 if (HAVE_SNPRINTF)
    set (JSON_SNPRINTF snprintf)

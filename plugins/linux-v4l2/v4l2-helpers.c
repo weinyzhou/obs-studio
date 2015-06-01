@@ -133,6 +133,27 @@ int_fast32_t v4l2_set_input(int_fast32_t dev, int *input)
 		: v4l2_ioctl(dev, VIDIOC_S_INPUT, input);
 }
 
+int_fast32_t v4l2_get_input_caps(int_fast32_t dev, int input, uint32_t *caps)
+{
+	if (!dev || !caps)
+		return -1;
+
+	if (input == -1) {
+		if (v4l2_ioctl(dev, VIDIOC_G_INPUT, &input) < 0)
+			return -1;
+	}
+
+	struct v4l2_input in;
+	memset(&in, 0, sizeof(in));
+	in.index = input;
+
+	if (v4l2_ioctl(dev, VIDIOC_ENUMINPUT, &in) < 0)
+		return -1;
+
+	*caps = in.capabilities;
+	return 0;
+}
+
 int_fast32_t v4l2_set_format(int_fast32_t dev, int *resolution,
 		int *pixelformat, int *bytesperline)
 {
@@ -197,5 +218,65 @@ int_fast32_t v4l2_set_framerate(int_fast32_t dev, int *framerate)
 
 	*framerate = v4l2_pack_tuple(par.parm.capture.timeperframe.numerator,
 			par.parm.capture.timeperframe.denominator);
+	return 0;
+}
+
+int_fast32_t v4l2_set_standard(int_fast32_t dev, int *standard)
+{
+	if (!dev || !standard)
+		return -1;
+
+	if (*standard == -1) {
+		if (v4l2_ioctl(dev, VIDIOC_G_STD, standard) < 0)
+			return -1;
+	} else {
+		if (v4l2_ioctl(dev, VIDIOC_S_STD, standard) < 0)
+			return -1;
+	}
+
+	return 0;
+}
+
+int_fast32_t v4l2_enum_dv_timing(int_fast32_t dev, struct v4l2_dv_timings *dvt,
+		int index)
+{
+#if !defined(VIDIOC_ENUM_DV_TIMINGS) || !defined(V4L2_IN_CAP_DV_TIMINGS)
+	UNUSED_PARAMETER(dev);
+	UNUSED_PARAMETER(dvt);
+	UNUSED_PARAMETER(index);
+	return -1;
+#else
+	if (!dev || !dvt)
+		return -1;
+
+	struct v4l2_enum_dv_timings iter;
+	memset(&iter, 0, sizeof(iter));
+	iter.index   = index;
+
+	if (v4l2_ioctl(dev, VIDIOC_ENUM_DV_TIMINGS, &iter) < 0)
+		return -1;
+
+	memcpy(dvt, &iter.timings, sizeof(struct v4l2_dv_timings));
+
+	return 0;
+#endif
+}
+
+int_fast32_t v4l2_set_dv_timing(int_fast32_t dev, int *timing)
+{
+	if (!dev || !timing)
+		return -1;
+
+	if (*timing == -1)
+		return 0;
+
+	struct v4l2_dv_timings dvt;
+
+	if (v4l2_enum_dv_timing(dev, &dvt, *timing) < 0)
+		return -1;
+
+	if (v4l2_ioctl(dev, VIDIOC_S_DV_TIMINGS, &dvt) < 0)
+		return -1;
+
 	return 0;
 }

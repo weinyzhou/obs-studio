@@ -18,6 +18,8 @@ typedef void              (*PropertiesUpdateCallback)(void *obj,
 class WidgetInfo : public QObject {
 	Q_OBJECT
 
+	friend class OBSPropertiesView;
+
 private:
 	OBSPropertiesView *view;
 	obs_property_t    *property;
@@ -33,6 +35,8 @@ private:
 	bool FontChanged(const char *setting);
 	void ButtonClicked();
 
+	void TogglePasswordText(bool checked);
+
 public:
 	inline WidgetInfo(OBSPropertiesView *view_, obs_property_t *prop,
 			QWidget *widget_)
@@ -40,6 +44,7 @@ public:
 	{}
 
 public slots:
+
 	void ControlChanged();
 };
 
@@ -66,15 +71,18 @@ private:
 	std::vector<std::unique_ptr<WidgetInfo>> children;
 	std::string                              lastFocused;
 	QWidget                                  *lastWidget = nullptr;
+	bool                                     deferUpdate;
 
 	QWidget *NewWidget(obs_property_t *prop, QWidget *widget,
 			const char *signal);
 
 	QWidget *AddCheckbox(obs_property_t *prop);
-	QWidget *AddText(obs_property_t *prop);
+	QWidget *AddText(obs_property_t *prop, QFormLayout *layout,
+			QLabel *&label);
 	void AddPath(obs_property_t *prop, QFormLayout *layout, QLabel **label);
-	QWidget *AddInt(obs_property_t *prop);
-	QWidget *AddFloat(obs_property_t *prop);
+	void AddInt(obs_property_t *prop, QFormLayout *layout, QLabel **label);
+	void AddFloat(obs_property_t *prop, QFormLayout *layout,
+			QLabel**label);
 	QWidget *AddList(obs_property_t *prop, bool &warning);
 	QWidget *AddButton(obs_property_t *prop);
 	void AddColor(obs_property_t *prop, QFormLayout *layout, QLabel *&label);
@@ -106,4 +114,7 @@ public:
 			int minSize = 0);
 
 	inline obs_data_t *GetSettings() const {return settings;}
+
+	inline void UpdateSettings() {callback(obj, settings);}
+	inline bool DeferUpdate() const {return deferUpdate;}
 };
